@@ -1,4 +1,4 @@
-import type { BuildingKind, TaskPriority, Vector } from './types'
+import type { BuildingKind, TaskPriority, UpgradeKind, Vector } from './types'
 
 type InputAction = 'place' | 'start' | 'restart'
 
@@ -51,6 +51,13 @@ export class InputController {
     return undefined
   }
 
+  consumeUpgradePurchase(): UpgradeKind | undefined {
+    if (this.justPressed.has('4')) return 'villagerSpeed'
+    if (this.justPressed.has('5')) return 'towerDamage'
+    if (this.justPressed.has('6')) return 'farmYield'
+    return undefined
+  }
+
   consumePrioritySelection(): TaskPriority | undefined {
     if (this.justPressed.has('g')) return 'gather'
     if (this.justPressed.has('b')) return 'build'
@@ -95,7 +102,10 @@ export class InputController {
       key === 's' ||
       key === 'd' ||
       key === 'q' ||
-      key === 'e'
+      key === 'e' ||
+      key === '4' ||
+      key === '5' ||
+      key === '6'
     ) {
       event.preventDefault()
     }

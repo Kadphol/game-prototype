@@ -7,6 +7,8 @@ import {
   MAX_DAYS,
   PALETTE,
   TILE_SIZE,
+  UPGRADES,
+  UPGRADE_ORDER,
   WIN_PROSPERITY,
   WORLD_COLUMNS,
   WORLD_OFFSET_X,
@@ -26,6 +28,7 @@ import type {
   SpawnWarning,
   TaskPriority,
   Tile,
+  UpgradeKind,
   Vector,
   Villager,
 } from './types'
@@ -54,28 +57,39 @@ const PRIORITY_ORDER: TaskPriority[] = ['gather', 'build', 'defend']
 
 export class KingdomRenderer {
   readonly stage = new Container()
+  private readonly backgroundLayer = new Container()
+  private readonly backgroundPattern = new Graphics()
+  private readonly nightOverlay = new Graphics()
+  private readonly terrainLayer = new Container()
   private readonly worldLayer = new Container()
   private readonly effectLayer = new Container()
   private readonly hudLayer = new Container()
   private readonly overlayLayer = new Container()
-  private readonly background = new Graphics()
   private pointerPosition: Vector = { x: GAME_WIDTH / 2, y: GAME_HEIGHT / 2 }
+  private pointerCursorTile?: Pick<Tile, 'column' | 'row'>
+  private pointerPlaceQueued = false
+  private terrainReady = false
 
   constructor(private readonly app: Application) {
-    this.stage.addChild(this.background, this.worldLayer, this.effectLayer, this.hudLayer, this.overlayLayer)
+    this.backgroundLayer.addChild(this.backgroundPattern, this.nightOverlay)
+    this.stage.addChild(this.backgroundLayer, this.terrainLayer, this.worldLayer, this.effectLayer, this.hudLayer, this.overlayLayer)
     this.stage.eventMode = 'static'
     this.stage.hitArea = app.screen
+    drawBackdropPattern(this.backgroundPattern)
     this.stage.on('pointermove', this.handlePointerMove)
+    this.stage.on('pointerdown', this.handlePointerDown)
   }
 
   destroy(): void {
     this.stage.off('pointermove', this.handlePointerMove)
+    this.stage.off('pointerdown', this.handlePointerDown)
     this.stage.destroy({ children: true })
   }
 
   renderStart(): void {
-    this.clear()
-    drawBackdrop(this.background, 0)
+    this.terrainLayer.visible = false
+    this.clearDynamic()
+    drawNightOverlay(this.nightOverlay, 0)
 
     const centerX = GAME_WIDTH / 2
     const titlePanel = new Graphics()
@@ -91,18 +105,19 @@ export class KingdomRenderer {
     const subtitle = centeredText('Raise a gentle realm before the fifth night.', centerX, 248, textStyles.dark)
     const controls = multilineText(
       [
-        'Move cursor: WASD / Arrow Keys',
+        'Move cursor: WASD / Arrow Keys or mouse hover',
+        'Tap/click a valid tile to place the current plan',
         'Villagers gather, build, and defend automatically',
         'Priority: Q/E cycle or G Gather, B Build, F Defend',
         'Build: 1 Hut, 2 Farm, 3 Watchtower',
-        'Place plan: Space / Enter on an empty grass tile',
+        'Upgrades: 4 Boots, 5 Arrows, 6 Seeds',
       ],
-      centerX - 255,
-      286,
+      centerX - 290,
+      278,
       textStyles.dark,
-      25
+      24
     )
-    const start = centeredText('Press Enter to Start', centerX, 424, textStyles.subtitle)
+    const start = centeredText('Press Enter to Start', centerX, 436, textStyles.subtitle)
     start.tint = PALETTE.deepInk
 
     this.overlayLayer.addChild(title, subtitle, ...controls, start)
@@ -112,8 +127,10 @@ export class KingdomRenderer {
   }
 
   renderGame(snapshot: GameSnapshot): void {
-    this.clear()
-    drawBackdrop(this.background, snapshot.dayTimer / DAY_LENGTH_SECONDS)
+    this.terrainLayer.visible = true
+    this.ensureTerrain(snapshot.tiles)
+    this.clearDynamic()
+    drawNightOverlay(this.nightOverlay, snapshot.dayTimer / DAY_LENGTH_SECONDS)
 
     // A tiny camera shake sells camp damage without complicating the simulation.
     const shake = snapshot.cameraShake > 0 ? Math.sin(performance.now() / 20) * snapshot.cameraShake * 16 : 0
@@ -133,11 +150,16 @@ export class KingdomRenderer {
     return this.pointerPosition
   }
 
-  private drawWorld(snapshot: GameSnapshot): void {
-    for (const tile of snapshot.tiles) {
-      drawTile(this.worldLayer, tile, snapshot.hoveredTile, snapshot.canPlaceHovered)
+  consumePointerCommand(): { cursorTile?: Pick<Tile, 'column' | 'row'>; place: boolean } {
+    const command = {
+      cursorTile: this.pointerCursorTile ? { ...this.pointerCursorTile } : undefined,
+      place: this.pointerPlaceQueued,
     }
+    this.pointerPlaceQueued = false
+    return command
+  }
 
+  private drawWorld(snapshot: GameSnapshot): void {
     this.drawPlacementGhost(snapshot)
 
     for (const warning of snapshot.spawnWarnings) {
@@ -148,13 +170,11 @@ export class KingdomRenderer {
       drawResourceNode(this.worldLayer, node)
     }
 
-    const sortedBuildings = [...snapshot.buildings].sort((a, b) => a.row - b.row)
-    for (const building of sortedBuildings) {
+    for (const building of snapshot.buildings) {
       drawBuilding(this.worldLayer, building)
     }
 
-    const sortedVillagers = [...snapshot.villagers].sort((a, b) => a.position.y - b.position.y)
-    for (const villager of sortedVillagers) {
+    for (const villager of snapshot.villagers) {
       drawVillager(this.worldLayer, villager)
     }
 
@@ -263,17 +283,26 @@ export class KingdomRenderer {
     const selected = BUILDINGS[snapshot.selectedBuilding]
     const selectedLines = multilineText(
       [
-        `${selected.label} plan`,
+        `${selected.hotkey} ${selected.label} plan`,
         `Cost ${compactCost(selected.cost)}`,
-        selected.description,
         snapshot.canPlaceHovered ? 'Cursor: valid site' : 'Cursor: blocked or unaffordable',
       ],
       918,
       594,
       textStyles.small,
-      22
+      21
     )
     this.hudLayer.addChild(...selectedLines)
+
+    const upgradeTitle = new Text({
+      text: 'Upgrades',
+      style: new TextStyle({ fontFamily, fontSize: 14, fill: PALETTE.white, fontWeight: '900' }),
+    })
+    upgradeTitle.position.set(1050, 590)
+    this.hudLayer.addChild(upgradeTitle)
+    UPGRADE_ORDER.forEach((kind, index) => {
+      this.drawUpgradeButton(kind, snapshot.upgrades[kind], 1046, 612 + index * 26, snapshot.resources)
+    })
 
     if (snapshot.statusTimer > 0) {
       const status = centeredText(snapshot.statusMessage, GAME_WIDTH / 2, 558, textStyles.body)
@@ -324,6 +353,34 @@ export class KingdomRenderer {
     this.hudLayer.addChild(button, label)
   }
 
+  private drawUpgradeButton(kind: UpgradeKind, level: number, x: number, y: number, resources: ResourceStock): void {
+    const definition = UPGRADES[kind]
+    const maxed = level >= definition.maxLevel
+    const cost = maxed ? undefined : definition.costs[level]
+    const affordable = cost ? canAfford(resources, cost) : false
+    const fill = maxed ? PALETTE.grassDark : affordable ? PALETTE.parchment : 0x8c7756
+    const button = new Graphics()
+      .rect(x, y, 188, 22)
+      .fill(fill)
+      .rect(x + 3, y + 3, 182, 16)
+      .stroke({ color: maxed ? PALETTE.gold : PALETTE.panelDark, width: 2 })
+    this.hudLayer.addChild(button)
+
+    const label = new Text({
+      text: `${definition.hotkey} ${definition.label} L${level}`,
+      style: new TextStyle({ fontFamily, fontSize: 11, fill: maxed || affordable ? PALETTE.deepInk : PALETTE.white, fontWeight: '900' }),
+    })
+    label.position.set(x + 8, y + 4)
+
+    const costText = new Text({
+      text: cost ? compactCost(cost) : 'MAX',
+      style: new TextStyle({ fontFamily, fontSize: 10, fill: maxed || affordable ? PALETTE.deepInk : PALETTE.white, fontWeight: '900' }),
+    })
+    costText.anchor.set(1, 0)
+    costText.position.set(x + 180, y + 5)
+    this.hudLayer.addChild(label, costText)
+  }
+
   private drawGameOver(result: GameResult): void {
     const veil = new Graphics().rect(0, 0, GAME_WIDTH, GAME_HEIGHT).fill({ color: PALETTE.deepInk, alpha: 0.64 })
     drawPanel(this.overlayLayer, 342, 166, 596, 360)
@@ -337,23 +394,39 @@ export class KingdomRenderer {
     this.overlayLayer.addChild(veil, title, reason, score, restart)
   }
 
-  private clear(): void {
-    this.background.clear()
-    this.worldLayer.removeChildren()
-    this.effectLayer.removeChildren()
-    this.hudLayer.removeChildren()
-    this.overlayLayer.removeChildren()
+  private ensureTerrain(tiles: Tile[]): void {
+    if (this.terrainReady) return
+
+    destroyChildren(this.terrainLayer)
+    for (const tile of tiles) {
+      drawTerrainTile(this.terrainLayer, tile)
+    }
+    this.terrainReady = true
+  }
+
+  private clearDynamic(): void {
+    destroyChildren(this.worldLayer)
+    destroyChildren(this.effectLayer)
+    destroyChildren(this.hudLayer)
+    destroyChildren(this.overlayLayer)
     this.worldLayer.position.set(0, 0)
     this.effectLayer.position.set(0, 0)
   }
 
   private readonly handlePointerMove = (event: FederatedPointerEvent): void => {
-    this.pointerPosition = event.global
+    this.pointerPosition = { x: event.global.x, y: event.global.y }
+    this.pointerCursorTile = screenToTile(this.pointerPosition)
+  }
+
+  private readonly handlePointerDown = (event: FederatedPointerEvent): void => {
+    this.app.canvas.focus()
+    this.pointerPosition = { x: event.global.x, y: event.global.y }
+    this.pointerCursorTile = screenToTile(this.pointerPosition)
+    this.pointerPlaceQueued = this.pointerCursorTile !== undefined
   }
 }
 
-function drawBackdrop(graphics: Graphics, dayProgress: number): void {
-  const nightAlpha = dayProgress < 0.35 ? 0.24 : 0
+function drawBackdropPattern(graphics: Graphics): void {
   graphics.clear()
   graphics.rect(0, 0, GAME_WIDTH, GAME_HEIGHT).fill(PALETTE.deepInk)
   graphics.rect(0, 0, GAME_WIDTH, GAME_HEIGHT).fill(PALETTE.grassDark)
@@ -364,14 +437,18 @@ function drawBackdrop(graphics: Graphics, dayProgress: number): void {
       }
     }
   }
+}
+
+function drawNightOverlay(graphics: Graphics, dayProgress: number): void {
+  const nightAlpha = dayProgress < 0.35 ? 0.24 : 0
+  graphics.clear()
   if (nightAlpha > 0) {
     graphics.rect(0, 0, GAME_WIDTH, GAME_HEIGHT).fill({ color: 0x162646, alpha: nightAlpha })
   }
 }
 
-function drawTile(layer: Container, tile: Tile, hoveredTile: Tile | undefined, canPlaceHovered: boolean): void {
+function drawTerrainTile(layer: Container, tile: Tile): void {
   const center = tileToScreen(tile)
-  const isHovered = hoveredTile?.column === tile.column && hoveredTile.row === tile.row
   // Chunky rectangles keep every sprite aligned to the pixel-art grid.
   const color = tile.terrain === 'water' ? PALETTE.water : tile.terrain === 'forest' ? PALETTE.forest : (tile.column + tile.row) % 2 === 0 ? PALETTE.grass : PALETTE.grassLight
   const tileGraphic = new Graphics()
@@ -379,14 +456,6 @@ function drawTile(layer: Container, tile: Tile, hoveredTile: Tile | undefined, c
     .fill(color)
     .rect(center.x - TILE_SIZE / 2, center.y - TILE_SIZE / 2, TILE_SIZE, TILE_SIZE)
     .stroke({ color: PALETTE.deepInk, alpha: 0.15, width: 2 })
-
-  if (isHovered) {
-    tileGraphic.rect(center.x - TILE_SIZE / 2 + 2, center.y - TILE_SIZE / 2 + 2, TILE_SIZE - 4, TILE_SIZE - 4).stroke({
-      color: canPlaceHovered ? PALETTE.gold : PALETTE.dangerLight,
-      alpha: 0.85,
-      width: 3,
-    })
-  }
 
   layer.addChild(tileGraphic)
 
@@ -691,6 +760,17 @@ function tileToScreen(tile: Pick<Tile, 'column' | 'row'>): Vector {
   }
 }
 
+function screenToTile(position: Vector): Pick<Tile, 'column' | 'row'> | undefined {
+  if (position.y >= GAME_HEIGHT - 152) return undefined
+
+  const column = Math.floor((position.x - WORLD_OFFSET_X) / TILE_SIZE)
+  const row = Math.floor((position.y - WORLD_OFFSET_Y) / TILE_SIZE)
+  if (column <= 0 || row <= 0 || column >= WORLD_COLUMNS - 1 || row >= WORLD_ROWS - 1) {
+    return undefined
+  }
+  return { column, row }
+}
+
 function resourceLine(resources: ResourceStock): string {
   return `Wood ${resources.wood}   Stone ${resources.stone}   Food ${resources.food}   Gold ${resources.gold}`
 }
@@ -700,6 +780,10 @@ function compactCost(cost: ResourceStock): string {
     .filter(([, value]) => value > 0)
     .map(([kind, value]) => `${kind[0].toUpperCase()}${value}`)
     .join(' ')
+}
+
+function canAfford(resources: ResourceStock, cost: ResourceStock): boolean {
+  return resources.wood >= cost.wood && resources.stone >= cost.stone && resources.food >= cost.food && resources.gold >= cost.gold
 }
 
 function resourceColor(kind: ResourceKind): number {
@@ -713,4 +797,10 @@ function priorityColor(priority: TaskPriority): number {
   if (priority === 'gather') return PALETTE.forest
   if (priority === 'build') return PALETTE.wood
   return PALETTE.blue
+}
+
+function destroyChildren(container: Container): void {
+  for (const child of container.removeChildren()) {
+    child.destroy({ children: true })
+  }
 }

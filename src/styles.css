@@ -41,4 +41,6 @@ canvas {
   image-rendering: pixelated;
   image-rendering: crisp-edges;
   outline: 0;
+  touch-action: none;
+  user-select: none;
 }

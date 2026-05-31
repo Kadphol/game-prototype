@@ -10,6 +10,8 @@ export type TaskPriority = 'gather' | 'build' | 'defend'
 
 export type VillagerTaskKind = 'idle' | 'gather' | 'build' | 'defend'
 
+export type UpgradeKind = 'villagerSpeed' | 'towerDamage' | 'farmYield'
+
 export interface Vector {
   x: number
   y: number
@@ -31,6 +33,17 @@ export interface BuildingDefinition {
   buildTime: number
   description: string
 }
+
+export interface UpgradeDefinition {
+  kind: UpgradeKind
+  label: string
+  hotkey: string
+  maxLevel: number
+  costs: ResourceStock[]
+  description: string
+}
+
+export type UpgradeState = Record<UpgradeKind, number>
 
 export interface Tile {
   column: number
@@ -159,6 +172,7 @@ export interface GameSnapshot {
   dayTimer: number
   priority: TaskPriority
   selectedBuilding: BuildingKind
+  upgrades: UpgradeState
   statusMessage: string
   statusTimer: number
   king: Player

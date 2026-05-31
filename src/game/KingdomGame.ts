@@ -1,5 +1,5 @@
 import { Application } from 'pixi.js'
-import { GAME_HEIGHT, GAME_WIDTH } from './config'
+import { GAME_HEIGHT, GAME_WIDTH, RENDER_FPS } from './config'
 import { InputController } from './input'
 import { KingdomRenderer } from './rendering'
 import type { GamePhase, GameSnapshot } from './types'
@@ -20,6 +20,7 @@ export class KingdomGame {
   private phase: GamePhase = 'start'
   private app?: Application
   private renderer?: KingdomRenderer
+  private renderAccumulator = 1 / RENDER_FPS
 
   constructor(private readonly root: HTMLElement) {}
 
@@ -68,41 +69,64 @@ export class KingdomGame {
     if (!this.app || !this.renderer) return
 
     const deltaSeconds = Math.min(this.app.ticker.deltaMS / 1000, 0.05)
+    const shouldRender = this.shouldRender(deltaSeconds)
 
     if (this.phase === 'start') {
+      this.renderer.consumePointerCommand()
       if (this.input.consumeAction('start')) {
         this.phase = 'playing'
         this.world.reset()
+        this.renderAccumulator = 1 / RENDER_FPS
       }
-      this.renderer.renderStart()
+      if (shouldRender) {
+        this.renderer.renderStart()
+      }
       this.input.endFrame()
       return
     }
 
     if (this.phase === 'gameOver') {
+      this.renderer.consumePointerCommand()
       if (this.input.consumeAction('restart')) {
         this.phase = 'playing'
         this.world.reset()
+        this.renderAccumulator = 1 / RENDER_FPS
       }
-      this.renderer.renderGame(this.world.snapshot())
+      if (shouldRender) {
+        this.renderer.renderGame(this.world.snapshot())
+      }
       this.input.endFrame()
       return
     }
 
     const selectedBuilding = this.input.consumeBuildingSelection()
+    const pointerCommand = this.renderer.consumePointerCommand()
     this.world.update(deltaSeconds, {
       cursorDelta: this.input.consumeCursorDelta(),
-      place: this.input.consumeAction('place'),
+      cursorTile: pointerCommand.cursorTile,
+      place: this.input.consumeAction('place') || pointerCommand.place,
       selectedBuilding,
       selectedPriority: this.input.consumePrioritySelection(),
       priorityCycle: this.input.consumePriorityCycle(),
+      upgradePurchase: this.input.consumeUpgradePurchase(),
     })
 
     const snapshot = this.world.snapshot()
     if (snapshot.phase === 'gameOver') {
       this.phase = 'gameOver'
     }
-    this.renderer.renderGame(snapshot)
+    if (shouldRender || snapshot.phase === 'gameOver') {
+      this.renderer.renderGame(snapshot)
+    }
     this.input.endFrame()
+  }
+
+  private shouldRender(deltaSeconds: number): boolean {
+    this.renderAccumulator += deltaSeconds
+    if (this.renderAccumulator < 1 / RENDER_FPS) {
+      return false
+    }
+    this.renderAccumulator = 0
+    return true
   }
 }

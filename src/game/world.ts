@@ -9,6 +9,7 @@ import {
   TILE_SIZE,
   TOWER_DAMAGE_PER_SECOND,
   TOWER_RANGE,
+  UPGRADES,
   VILLAGER_SPEED,
   WIN_PROSPERITY,
   WORLD_COLUMNS,
@@ -33,6 +34,8 @@ import type {
   TaskPriority,
   Terrain,
   Tile,
+  UpgradeKind,
+  UpgradeState,
   Vector,
   Villager,
   VillagerTask,
@@ -58,6 +61,7 @@ interface WorldState {
   dayTimer: number
   priority: TaskPriority
   selectedBuilding: BuildingKind
+  upgrades: UpgradeState
   statusMessage: string
   statusTimer: number
   king: {
@@ -84,10 +88,12 @@ interface WorldState {
 
 export interface WorldInput {
   cursorDelta: Vector
+  cursorTile?: Pick<CommandCursor, 'column' | 'row'>
   place: boolean
   selectedBuilding?: BuildingKind
   selectedPriority?: TaskPriority
   priorityCycle: number
+  upgradePurchase?: UpgradeKind
 }
 
 export class KingdomWorld {
@@ -106,6 +112,7 @@ export class KingdomWorld {
       dayTimer: this.state.dayTimer,
       priority: this.state.priority,
       selectedBuilding: this.state.selectedBuilding,
+      upgrades: { ...this.state.upgrades },
       statusMessage: this.state.statusMessage,
       statusTimer: this.state.statusTimer,
       king: {
@@ -138,7 +145,11 @@ export class KingdomWorld {
     if (this.state.result) return
 
     this.updateSelection(input)
-    this.updateCommandCursor(deltaSeconds, input.cursorDelta)
+    this.updateCommandCursor(deltaSeconds, input.cursorDelta, input.cursorTile)
+
+    if (input.upgradePurchase) {
+      this.tryPurchaseUpgrade(input.upgradePurchase)
+    }
 
     if (input.place) {
       this.tryPlaceBuilding()
@@ -179,6 +190,11 @@ export class KingdomWorld {
       dayTimer: DAY_LENGTH_SECONDS,
       priority: 'gather',
       selectedBuilding: 'hut',
+      upgrades: {
+        villagerSpeed: 0,
+        towerDamage: 0,
+        farmYield: 0,
+      },
       statusMessage: 'Villagers work automatically. Set priority and place buildings.',
       statusTimer: 4.5,
       king: {
@@ -250,8 +266,14 @@ export class KingdomWorld {
     this.setStatus(`Priority: ${priority.toUpperCase()}. Villagers retask as they finish jobs.`, 2.4)
   }
 
-  private updateCommandCursor(deltaSeconds: number, cursorDelta: Vector): void {
+  private updateCommandCursor(deltaSeconds: number, cursorDelta: Vector, cursorTile?: Pick<CommandCursor, 'column' | 'row'>): void {
     this.state.commandCursor.pulse += deltaSeconds * 5
+
+    if (cursorTile) {
+      this.state.commandCursor.column = clamp(cursorTile.column, 1, WORLD_COLUMNS - 2)
+      this.state.commandCursor.row = clamp(cursorTile.row, 1, WORLD_ROWS - 2)
+    }
+
     if (cursorDelta.x === 0 && cursorDelta.y === 0) return
 
     const nextColumn = clamp(this.state.commandCursor.column + Math.sign(cursorDelta.x), 1, WORLD_COLUMNS - 2)
@@ -294,6 +316,29 @@ export class KingdomWorld {
     this.addFloatingText('planned', tileCenter(tile.column, tile.row), PALETTE.gold)
     this.spawnSparkles(tileCenter(tile.column, tile.row), PALETTE.gold, 8)
     this.setStatus(`${definition.label} planned. Builders will finish it.`, 2.2)
+  }
+
+  private tryPurchaseUpgrade(kind: UpgradeKind): void {
+    const definition = UPGRADES[kind]
+    const level = this.state.upgrades[kind]
+
+    if (level >= definition.maxLevel) {
+      this.failAtCursor(`${definition.label} is max level`)
+      return
+    }
+
+    const cost = definition.costs[level]
+    if (!canAfford(this.state.resources, cost)) {
+      this.failAtCursor(`Need ${formatCost(cost)}`)
+      return
+    }
+
+    spend(this.state.resources, cost)
+    this.state.upgrades[kind] += 1
+    const camp = tileCenter(CAMP_COLUMN, CAMP_ROW)
+    this.addFloatingText(`${definition.label} Lv ${this.state.upgrades[kind]}`, camp, PALETTE.gold)
+    this.spawnSparkles(camp, PALETTE.gold, 14)
+    this.setStatus(`${definition.label} upgraded: ${definition.description}.`, 2.4)
   }
 
   private ensureVillagerCount(): void {
@@ -387,7 +432,8 @@ export class KingdomWorld {
 
   private moveVillagerToward(villager: Villager, target: Vector, deltaSeconds: number): void {
     const direction = normalize({ x: target.x - villager.position.x, y: target.y - villager.position.y })
-    const speed = villager.task.kind === 'defend' ? DEFENDER_SPEED : villager.speed
+    const speedMultiplier = 1 + this.state.upgrades.villagerSpeed * 0.16
+    const speed = (villager.task.kind === 'defend' ? DEFENDER_SPEED : villager.speed) * speedMultiplier
     villager.position.x += direction.x * speed * deltaSeconds
     villager.position.y += direction.y * speed * deltaSeconds
   }
@@ -489,8 +535,9 @@ export class KingdomWorld {
         building.productionTimer -= deltaSeconds
         if (building.productionTimer <= 0) {
           building.productionTimer = 6.5
-          this.state.resources.food += 5
-          this.addFloatingText('+5 food', tileCenter(building.column, building.row), PALETTE.berry)
+          const foodYield = 5 + this.state.upgrades.farmYield * 2
+          this.state.resources.food += foodYield
+          this.addFloatingText(`+${foodYield} food`, tileCenter(building.column, building.row), PALETTE.berry)
           this.spawnSparkles(tileCenter(building.column, building.row), PALETTE.berry, 4)
         }
       }
@@ -559,10 +606,12 @@ export class KingdomWorld {
   }
 
   private updateTowerAttacks(deltaSeconds: number): void {
-    const damageBoost = this.state.priority === 'defend' ? 1.35 : 1
-    for (const tower of this.state.buildings.filter((building) => building.complete && building.kind === 'tower')) {
+    const damageBoost = (this.state.priority === 'defend' ? 1.35 : 1) * (1 + this.state.upgrades.towerDamage * 0.32)
+    for (const tower of this.state.buildings) {
+      if (!tower.complete || tower.kind !== 'tower') continue
+
       const towerCenter = tileCenter(tower.column, tower.row)
-      const target = nearestHazard(towerCenter, this.state.hazards.filter((hazard) => hazard.state === 'raiding' && distance(towerCenter, hazard.position) < TOWER_RANGE))
+      const target = nearestHazardInRange(towerCenter, this.state.hazards, TOWER_RANGE)
       if (!target) continue
 
       target.health -= TOWER_DAMAGE_PER_SECOND * damageBoost * deltaSeconds
@@ -724,7 +773,7 @@ export class KingdomWorld {
   }
 
   private nearestCompleteTower(position: Vector): Building | undefined {
-    return nearestBuilding(position, this.state.buildings.filter((building) => building.complete && building.kind === 'tower'))
+    return nearestCompleteTower(position, this.state.buildings)
   }
 
   private canPlaceOnTile(tile: Tile, kind: BuildingKind): boolean {
@@ -745,7 +794,7 @@ export class KingdomWorld {
   }
 
   private tileAtCursor(cursor: CommandCursor): Tile | undefined {
-    return this.state.tiles.find((tile) => tile.column === cursor.column && tile.row === cursor.row)
+    return this.state.tiles[cursor.row * WORLD_COLUMNS + cursor.column]
   }
 
   private failAtCursor(message: string): void {
@@ -913,11 +962,29 @@ function formatCost(cost: ResourceStock): string {
 }
 
 function nearestNode(position: Vector, nodes: ResourceNode[]): ResourceNode | undefined {
-  return [...nodes].sort((a, b) => distance(position, tileCenter(a.column, a.row)) - distance(position, tileCenter(b.column, b.row)))[0]
+  let nearest: ResourceNode | undefined
+  let nearestDistance = Number.POSITIVE_INFINITY
+  for (const node of nodes) {
+    const nodeDistance = distance(position, tileCenter(node.column, node.row))
+    if (nodeDistance < nearestDistance) {
+      nearest = node
+      nearestDistance = nodeDistance
+    }
+  }
+  return nearest
 }
 
 function nearestBuilding(position: Vector, buildings: Building[]): Building | undefined {
-  return [...buildings].sort((a, b) => distance(position, tileCenter(a.column, a.row)) - distance(position, tileCenter(b.column, b.row)))[0]
+  let nearest: Building | undefined
+  let nearestDistance = Number.POSITIVE_INFINITY
+  for (const building of buildings) {
+    const buildingDistance = distance(position, tileCenter(building.column, building.row))
+    if (buildingDistance < nearestDistance) {
+      nearest = building
+      nearestDistance = buildingDistance
+    }
+  }
+  return nearest
 }
 
 function nearestBuildingId(position: Vector, buildings: Building[]): number | undefined {
@@ -925,11 +992,50 @@ function nearestBuildingId(position: Vector, buildings: Building[]): number | un
 }
 
 function nearestHazard(position: Vector, hazards: Hazard[]): Hazard | undefined {
-  return [...hazards].sort((a, b) => distance(position, a.position) - distance(position, b.position))[0]
+  let nearest: Hazard | undefined
+  let nearestDistance = Number.POSITIVE_INFINITY
+  for (const hazard of hazards) {
+    const hazardDistance = distance(position, hazard.position)
+    if (hazardDistance < nearestDistance) {
+      nearest = hazard
+      nearestDistance = hazardDistance
+    }
+  }
+  return nearest
 }
 
 function nearestHazardId(position: Vector, hazards: Hazard[]): number | undefined {
   return nearestHazard(position, hazards)?.id
+}
+
+function nearestHazardInRange(position: Vector, hazards: Hazard[], range: number): Hazard | undefined {
+  let nearest: Hazard | undefined
+  let nearestDistance = range
+  for (const hazard of hazards) {
+    if (hazard.state !== 'raiding') continue
+
+    const hazardDistance = distance(position, hazard.position)
+    if (hazardDistance < nearestDistance) {
+      nearest = hazard
+      nearestDistance = hazardDistance
+    }
+  }
+  return nearest
+}
+
+function nearestCompleteTower(position: Vector, buildings: Building[]): Building | undefined {
+  let nearest: Building | undefined
+  let nearestDistance = Number.POSITIVE_INFINITY
+  for (const building of buildings) {
+    if (!building.complete || building.kind !== 'tower') continue
+
+    const buildingDistance = distance(position, tileCenter(building.column, building.row))
+    if (buildingDistance < nearestDistance) {
+      nearest = building
+      nearestDistance = buildingDistance
+    }
+  }
+  return nearest
 }
 
 function offsetTarget(position: Vector, seed: number): Vector {

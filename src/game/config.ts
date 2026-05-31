@@ -1,4 +1,4 @@
-import type { BuildingDefinition, BuildingKind } from './types'
+import type { BuildingDefinition, BuildingKind, UpgradeDefinition, UpgradeKind } from './types'
 
 export const GAME_WIDTH = 1280
 export const GAME_HEIGHT = 720
@@ -16,6 +16,7 @@ export const STARTING_MORALE = 100
 export const MAX_VISIBLE_VILLAGERS = 7
 export const TOWER_RANGE = 168
 export const TOWER_DAMAGE_PER_SECOND = 26
+export const RENDER_FPS = 30
 
 export const PALETTE = {
   ink: 0x1e211d,
@@ -56,7 +57,7 @@ export const BUILDINGS: Record<BuildingKind, BuildingDefinition> = {
     cost: { wood: 16, stone: 2, food: 0, gold: 3 },
     prosperity: 13,
     buildTime: 8,
-    description: '+5 food over time',
+    description: 'grows food over time',
   },
   tower: {
     kind: 'tower',
@@ -70,3 +71,44 @@ export const BUILDINGS: Record<BuildingKind, BuildingDefinition> = {
 }
 
 export const BUILDING_ORDER: BuildingKind[] = ['hut', 'farm', 'tower']
+
+export const UPGRADES: Record<UpgradeKind, UpgradeDefinition> = {
+  villagerSpeed: {
+    kind: 'villagerSpeed',
+    label: 'Boots',
+    hotkey: '4',
+    maxLevel: 3,
+    costs: [
+      { wood: 16, stone: 0, food: 8, gold: 5 },
+      { wood: 24, stone: 4, food: 10, gold: 9 },
+      { wood: 34, stone: 8, food: 14, gold: 14 },
+    ],
+    description: 'villagers move faster',
+  },
+  towerDamage: {
+    kind: 'towerDamage',
+    label: 'Arrows',
+    hotkey: '5',
+    maxLevel: 3,
+    costs: [
+      { wood: 10, stone: 12, food: 0, gold: 7 },
+      { wood: 14, stone: 18, food: 0, gold: 12 },
+      { wood: 20, stone: 26, food: 0, gold: 18 },
+    ],
+    description: 'towers hit harder',
+  },
+  farmYield: {
+    kind: 'farmYield',
+    label: 'Seeds',
+    hotkey: '6',
+    maxLevel: 3,
+    costs: [
+      { wood: 10, stone: 0, food: 12, gold: 6 },
+      { wood: 16, stone: 0, food: 18, gold: 10 },
+      { wood: 24, stone: 4, food: 26, gold: 15 },
+    ],
+    description: 'farms grow more food',
+  },
+}
+
+export const UPGRADE_ORDER: UpgradeKind[] = ['villagerSpeed', 'towerDamage', 'farmYield']
