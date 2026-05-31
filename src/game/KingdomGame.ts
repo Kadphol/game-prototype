@@ -91,10 +91,11 @@ export class KingdomGame {
 
     const selectedBuilding = this.input.consumeBuildingSelection()
     this.world.update(deltaSeconds, {
-      movement: this.input.movement(),
-      gather: this.input.consumeAction('interact'),
+      cursorDelta: this.input.consumeCursorDelta(),
       place: this.input.consumeAction('place'),
       selectedBuilding,
+      selectedPriority: this.input.consumePrioritySelection(),
+      priorityCycle: this.input.consumePriorityCycle(),
     })
 
     const snapshot = this.world.snapshot()

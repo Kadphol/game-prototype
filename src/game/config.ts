@@ -7,12 +7,15 @@ export const WORLD_COLUMNS = 20
 export const WORLD_ROWS = 12
 export const WORLD_OFFSET_X = 160
 export const WORLD_OFFSET_Y = 92
-export const KING_SPEED = 170
-export const INTERACTION_RANGE = 56
+export const VILLAGER_SPEED = 92
+export const DEFENDER_SPEED = 116
 export const DAY_LENGTH_SECONDS = 42
 export const MAX_DAYS = 5
 export const WIN_PROSPERITY = 100
 export const STARTING_MORALE = 100
+export const MAX_VISIBLE_VILLAGERS = 7
+export const TOWER_RANGE = 168
+export const TOWER_DAMAGE_PER_SECOND = 26
 
 export const PALETTE = {
   ink: 0x1e211d,
@@ -41,25 +44,28 @@ export const BUILDINGS: Record<BuildingKind, BuildingDefinition> = {
     kind: 'hut',
     label: 'Hut',
     hotkey: '1',
-    cost: { wood: 18, stone: 4, food: 8, gold: 0 },
-    prosperity: 18,
-    description: '+pop, +gold each dawn',
+    cost: { wood: 14, stone: 3, food: 6, gold: 0 },
+    prosperity: 16,
+    buildTime: 7,
+    description: '+villager, +gold at dawn',
   },
   farm: {
     kind: 'farm',
     label: 'Farm',
     hotkey: '2',
-    cost: { wood: 12, stone: 2, food: 0, gold: 4 },
-    prosperity: 14,
-    description: 'grows food over time',
+    cost: { wood: 16, stone: 2, food: 0, gold: 3 },
+    prosperity: 13,
+    buildTime: 8,
+    description: '+5 food over time',
   },
   tower: {
     kind: 'tower',
     label: 'Tower',
     hotkey: '3',
-    cost: { wood: 14, stone: 14, food: 0, gold: 6 },
-    prosperity: 22,
-    description: 'repels night hazards',
+    cost: { wood: 18, stone: 16, food: 0, gold: 7 },
+    prosperity: 24,
+    buildTime: 10,
+    description: 'fires at night hazards',
   },
 }
 

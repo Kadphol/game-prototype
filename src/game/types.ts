@@ -6,6 +6,10 @@ export type ResourceKind = 'wood' | 'stone' | 'food' | 'gold'
 
 export type BuildingKind = 'hut' | 'farm' | 'tower'
 
+export type TaskPriority = 'gather' | 'build' | 'defend'
+
+export type VillagerTaskKind = 'idle' | 'gather' | 'build' | 'defend'
+
 export interface Vector {
   x: number
   y: number
@@ -24,6 +28,7 @@ export interface BuildingDefinition {
   hotkey: string
   cost: ResourceStock
   prosperity: number
+  buildTime: number
   description: string
 }
 
@@ -51,7 +56,11 @@ export interface Building {
   row: number
   age: number
   pulse: number
+  complete: boolean
+  buildProgress: number
+  buildTime: number
   productionTimer: number
+  attackCooldown: number
 }
 
 export interface Hazard {
@@ -59,8 +68,53 @@ export interface Hazard {
   position: Vector
   speed: number
   health: number
+  maxHealth: number
   state: 'raiding' | 'fleeing'
   attackCooldown: number
+  hitFlash: number
+}
+
+export interface VillagerTask {
+  kind: VillagerTaskKind
+  targetNodeId?: number
+  targetBuildingId?: number
+  targetHazardId?: number
+  phase?: 'toTarget' | 'toCamp'
+}
+
+export interface Villager {
+  id: number
+  position: Vector
+  target: Vector
+  task: VillagerTask
+  carried?: Exclude<ResourceKind, 'gold'>
+  carriedAmount: number
+  speed: number
+  workTimer: number
+  pauseTimer: number
+  stepTime: number
+}
+
+export interface CommandCursor {
+  column: number
+  row: number
+  pulse: number
+}
+
+export interface SpawnWarning {
+  id: number
+  position: Vector
+  timer: number
+  maxTimer: number
+}
+
+export interface AttackEffect {
+  id: number
+  from: Vector
+  to: Vector
+  color: number
+  life: number
+  maxLife: number
 }
 
 export interface FloatingText {
@@ -103,17 +157,23 @@ export interface GameSnapshot {
   prosperity: number
   day: number
   dayTimer: number
+  priority: TaskPriority
   selectedBuilding: BuildingKind
   statusMessage: string
   statusTimer: number
-  player: Player
+  king: Player
+  commandCursor: CommandCursor
   tiles: Tile[]
   nodes: ResourceNode[]
   buildings: Building[]
+  villagers: Villager[]
   hazards: Hazard[]
+  spawnWarnings: SpawnWarning[]
+  attackEffects: AttackEffect[]
   floatingTexts: FloatingText[]
   particles: Particle[]
   hoveredTile?: Tile
   canPlaceHovered: boolean
   cameraShake: number
+  campHitFlash: number
 }

@@ -14,6 +14,7 @@ import {
   WORLD_ROWS,
 } from './config'
 import type {
+  AttackEffect,
   Building,
   BuildingKind,
   GameResult,
@@ -22,8 +23,11 @@ import type {
   ResourceKind,
   ResourceNode,
   ResourceStock,
+  SpawnWarning,
+  TaskPriority,
   Tile,
   Vector,
+  Villager,
 } from './types'
 
 import {
@@ -45,6 +49,8 @@ const textStyles = {
   subtitle: new TextStyle({ fontFamily, fontSize: 22, fill: PALETTE.parchment, fontWeight: '700' }),
   dark: new TextStyle({ fontFamily, fontSize: 16, fill: PALETTE.deepInk, fontWeight: '900' }),
 }
+
+const PRIORITY_ORDER: TaskPriority[] = ['gather', 'build', 'defend']
 
 export class KingdomRenderer {
   readonly stage = new Container()
@@ -85,15 +91,16 @@ export class KingdomRenderer {
     const subtitle = centeredText('Raise a gentle realm before the fifth night.', centerX, 248, textStyles.dark)
     const controls = multilineText(
       [
-        'Move: WASD / Arrow Keys',
-        'Gather: E near trees, rocks, and berry bushes',
+        'Move cursor: WASD / Arrow Keys',
+        'Villagers gather, build, and defend automatically',
+        'Priority: Q/E cycle or G Gather, B Build, F Defend',
         'Build: 1 Hut, 2 Farm, 3 Watchtower',
-        'Place: Space / Enter on an empty grass tile',
+        'Place plan: Space / Enter on an empty grass tile',
       ],
       centerX - 255,
-      298,
+      286,
       textStyles.dark,
-      27
+      25
     )
     const start = centeredText('Press Enter to Start', centerX, 424, textStyles.subtitle)
     start.tint = PALETTE.deepInk
@@ -133,6 +140,10 @@ export class KingdomRenderer {
 
     this.drawPlacementGhost(snapshot)
 
+    for (const warning of snapshot.spawnWarnings) {
+      drawSpawnWarning(this.worldLayer, warning)
+    }
+
     for (const node of snapshot.nodes) {
       drawResourceNode(this.worldLayer, node)
     }
@@ -142,11 +153,17 @@ export class KingdomRenderer {
       drawBuilding(this.worldLayer, building)
     }
 
+    const sortedVillagers = [...snapshot.villagers].sort((a, b) => a.position.y - b.position.y)
+    for (const villager of sortedVillagers) {
+      drawVillager(this.worldLayer, villager)
+    }
+
     for (const hazard of snapshot.hazards) {
       drawHazard(this.worldLayer, hazard)
     }
 
-    drawTinyKing(this.worldLayer, snapshot.player.position, 1.35, snapshot.player.stepTime)
+    drawCampHitFlash(this.worldLayer, snapshot.campHitFlash)
+    drawTinyKing(this.worldLayer, snapshot.king.position, 1.35, snapshot.king.stepTime)
   }
 
   private drawPlacementGhost(snapshot: GameSnapshot): void {
@@ -154,15 +171,22 @@ export class KingdomRenderer {
 
     const center = tileToScreen(snapshot.hoveredTile)
     const color = snapshot.canPlaceHovered ? PALETTE.gold : PALETTE.dangerLight
+    const pulse = 0.5 + Math.sin(snapshot.commandCursor.pulse) * 0.5
     const ghost = new Graphics()
       .rect(center.x - TILE_SIZE / 2 + 4, center.y - TILE_SIZE / 2 + 4, TILE_SIZE - 8, TILE_SIZE - 8)
       .stroke({ color, alpha: 0.9, width: 3 })
       .rect(center.x - 12, center.y - 12, 24, 24)
-      .fill({ color, alpha: snapshot.canPlaceHovered ? 0.25 : 0.18 })
+      .fill({ color, alpha: snapshot.canPlaceHovered ? 0.18 + pulse * 0.12 : 0.18 })
+      .rect(center.x - 5, center.y - 30, 10, 9)
+      .fill(color)
     this.worldLayer.addChild(ghost)
   }
 
   private drawEffects(snapshot: GameSnapshot): void {
+    for (const effect of snapshot.attackEffects) {
+      drawAttackEffect(this.effectLayer, effect)
+    }
+
     for (const particle of snapshot.particles) {
       const alpha = particle.life / particle.maxLife
       const sparkle = new Graphics()
@@ -185,7 +209,7 @@ export class KingdomRenderer {
   }
 
   private drawHud(snapshot: GameSnapshot): void {
-    drawPanel(this.hudLayer, 22, 16, 790, 62)
+    drawPanel(this.hudLayer, 22, 16, 774, 62)
     const resources = resourceLine(snapshot.resources)
     const resourceText = new Text({
       text: resources,
@@ -195,37 +219,61 @@ export class KingdomRenderer {
     this.hudLayer.addChild(resourceText)
 
     const dayProgress = 1 - snapshot.dayTimer / DAY_LENGTH_SECONDS
-    drawPanel(this.hudLayer, 838, 16, 420, 62)
+    drawPanel(this.hudLayer, 818, 16, 440, 62)
     const dayText = new Text({
-      text: `Day ${snapshot.day}/${MAX_DAYS}  Prosperity ${snapshot.prosperity}/${WIN_PROSPERITY}`,
+      text: `Day ${snapshot.day}/${MAX_DAYS}  Morale ${snapshot.morale}%`,
       style: textStyles.small,
     })
-    dayText.position.set(860, 30)
+    dayText.position.set(840, 30)
     const dayBar = new Graphics()
-      .rect(860, 57, 360, 8)
+      .rect(840, 57, 170, 8)
       .fill(PALETTE.panelDark)
-      .rect(860, 57, 360 * dayProgress, 8)
+      .rect(840, 57, 170 * dayProgress, 8)
       .fill(snapshot.dayTimer < DAY_LENGTH_SECONDS * 0.35 ? PALETTE.dangerLight : PALETTE.gold)
+      .rect(1036, 57, 170, 8)
+      .fill(PALETTE.panelDark)
+      .rect(1036, 57, 170 * Math.max(0, snapshot.morale / 100), 8)
+      .fill(snapshot.morale > 40 ? PALETTE.grassLight : PALETTE.dangerLight)
     this.hudLayer.addChild(dayText, dayBar)
 
-    drawPanel(this.hudLayer, 22, 94, 128, 108)
-    const moraleText = multilineText([`Pop ${snapshot.population}`, `Morale ${snapshot.morale}`], 42, 118, textStyles.small, 30)
-    this.hudLayer.addChild(...moraleText)
-
-    drawPanel(this.hudLayer, 948, 590, 310, 104)
+    drawPanel(this.hudLayer, 1014, 94, 244, 178)
     const objective = multilineText(
-      ['Objective', 'Reach 100 prosperity', 'before Day 5 ends.'],
-      970,
-      610,
+      ['Objective', `Prosperity ${snapshot.prosperity}/${WIN_PROSPERITY}`, 'before Day 5 ends.', `Villagers ${snapshot.villagers.length}/${snapshot.population}`],
+      1036,
+      116,
       textStyles.small,
       24
     )
     this.hudLayer.addChild(...objective)
 
-    drawPanel(this.hudLayer, 260, 594, 604, 104)
-    BUILDING_ORDER.forEach((kind, index) => {
-      this.drawBuildButton(kind, snapshot.selectedBuilding === kind, 282 + index * 190, 614, snapshot.resources)
+    drawPanel(this.hudLayer, 22, 574, 332, 122)
+    const priorityTitle = new Text({ text: 'Priority', style: textStyles.small })
+    priorityTitle.position.set(42, 594)
+    this.hudLayer.addChild(priorityTitle)
+    PRIORITY_ORDER.forEach((priority, index) => {
+      this.drawPriorityButton(priority, snapshot.priority === priority, 42 + index * 98, 626)
     })
+
+    drawPanel(this.hudLayer, 374, 574, 504, 122)
+    BUILDING_ORDER.forEach((kind, index) => {
+      this.drawBuildButton(kind, snapshot.selectedBuilding === kind, 396 + index * 156, 612, snapshot.resources)
+    })
+
+    drawPanel(this.hudLayer, 898, 574, 360, 122)
+    const selected = BUILDINGS[snapshot.selectedBuilding]
+    const selectedLines = multilineText(
+      [
+        `${selected.label} plan`,
+        `Cost ${compactCost(selected.cost)}`,
+        selected.description,
+        snapshot.canPlaceHovered ? 'Cursor: valid site' : 'Cursor: blocked or unaffordable',
+      ],
+      918,
+      594,
+      textStyles.small,
+      22
+    )
+    this.hudLayer.addChild(...selectedLines)
 
     if (snapshot.statusTimer > 0) {
       const status = centeredText(snapshot.statusMessage, GAME_WIDTH / 2, 558, textStyles.body)
@@ -242,9 +290,9 @@ export class KingdomRenderer {
       resources.food >= definition.cost.food &&
       resources.gold >= definition.cost.gold
     const button = new Graphics()
-      .rect(x, y, 168, 62)
+      .rect(x, y, 136, 62)
       .fill(selected ? PALETTE.gold : affordable ? PALETTE.parchment : 0x8c7756)
-      .rect(x + 4, y + 4, 160, 54)
+      .rect(x + 4, y + 4, 128, 54)
       .stroke({ color: selected ? PALETTE.white : PALETTE.panelDark, width: 3 })
     this.hudLayer.addChild(button)
 
@@ -259,6 +307,21 @@ export class KingdomRenderer {
     })
     cost.position.set(x + 12, y + 36)
     this.hudLayer.addChild(label, cost)
+  }
+
+  private drawPriorityButton(priority: TaskPriority, selected: boolean, x: number, y: number): void {
+    const button = new Graphics()
+      .rect(x, y, 82, 50)
+      .fill(selected ? PALETTE.gold : priorityColor(priority))
+      .rect(x + 4, y + 4, 74, 42)
+      .stroke({ color: selected ? PALETTE.white : PALETTE.panelDark, width: 3 })
+    const label = new Text({
+      text: priority.toUpperCase(),
+      style: new TextStyle({ fontFamily, fontSize: 13, fill: selected ? PALETTE.deepInk : PALETTE.white, fontWeight: '900' }),
+    })
+    label.anchor.set(0.5)
+    label.position.set(x + 41, y + 27)
+    this.hudLayer.addChild(button, label)
   }
 
   private drawGameOver(result: GameResult): void {
@@ -366,6 +429,11 @@ function drawResourceNode(layer: Container, node: ResourceNode): void {
 function drawBuilding(layer: Container, building: Building): void {
   const center = tileToScreen(building)
   const scale = 1 + building.pulse * 0.18
+  if (!building.complete) {
+    drawConstructionSite(layer, building, center, scale)
+    return
+  }
+
   if (building.kind === 'hut') {
     const hut = new Graphics()
       .rect(center.x - 18 * scale, center.y - 4 * scale, 36 * scale, 28 * scale)
@@ -397,6 +465,71 @@ function drawBuilding(layer: Container, building: Building): void {
   }
 }
 
+function drawConstructionSite(layer: Container, building: Building, center: Vector, scale: number): void {
+  const progress = Math.max(0, Math.min(1, building.buildProgress / building.buildTime))
+  const site = new Graphics()
+    .rect(center.x - 21 * scale, center.y - 15 * scale, 42 * scale, 34 * scale)
+    .fill(0x7a5634)
+    .rect(center.x - 18 * scale, center.y - 23 * scale, 8 * scale, 42 * scale)
+    .fill(PALETTE.wood)
+    .rect(center.x + 10 * scale, center.y - 23 * scale, 8 * scale, 42 * scale)
+    .fill(PALETTE.wood)
+    .rect(center.x - 24 * scale, center.y - 18 * scale, 48 * scale, 7 * scale)
+    .fill(PALETTE.parchmentDark)
+    .rect(center.x - 22, center.y + 24, 44, 6)
+    .fill(PALETTE.panelDark)
+    .rect(center.x - 22, center.y + 24, 44 * progress, 6)
+    .fill(PALETTE.gold)
+  layer.addChild(site)
+}
+
+function drawVillager(layer: Container, villager: Villager): void {
+  const bob = Math.sin(villager.stepTime) * 2
+  const x = Math.round(villager.position.x)
+  const y = Math.round(villager.position.y + bob)
+  const bodyColor = villager.task.kind === 'defend' ? PALETTE.blue : villager.task.kind === 'build' ? PALETTE.gold : 0x5f8f46
+  const villagerGraphic = new Graphics()
+    .rect(x - 7, y - 18, 14, 18)
+    .fill(bodyColor)
+    .rect(x - 9, y - 28, 18, 12)
+    .fill(0xd49a6a)
+    .rect(x - 10, y - 34, 20, 7)
+    .fill(0x755035)
+    .rect(x - 4, y - 24, 3, 3)
+    .fill(PALETTE.deepInk)
+    .rect(x + 3, y - 24, 3, 3)
+    .fill(PALETTE.deepInk)
+  layer.addChild(villagerGraphic)
+
+  if (villager.carried) {
+    const carried = new Graphics()
+      .rect(x + 8, y - 14, 9, 9)
+      .fill(resourceColor(villager.carried))
+    layer.addChild(carried)
+  }
+
+  drawTaskIcon(layer, villager.task.kind, x, y - 47)
+}
+
+function drawTaskIcon(layer: Container, task: Villager['task']['kind'], x: number, y: number): void {
+  if (task === 'idle') return
+
+  const icon = new Graphics()
+    .rect(x - 12, y - 9, 24, 18)
+    .fill(PALETTE.parchment)
+    .rect(x - 12, y - 9, 24, 18)
+    .stroke({ color: PALETTE.panelDark, width: 2 })
+
+  if (task === 'gather') {
+    icon.rect(x - 6, y - 1, 12, 4).fill(PALETTE.wood).rect(x + 2, y - 6, 5, 5).fill(PALETTE.stone)
+  } else if (task === 'build') {
+    icon.rect(x - 7, y - 3, 14, 5).fill(PALETTE.wood).rect(x + 2, y - 7, 5, 13).fill(PALETTE.stone)
+  } else {
+    icon.rect(x - 6, y - 5, 12, 12).fill(PALETTE.blue).rect(x - 3, y - 2, 6, 6).fill(PALETTE.white)
+  }
+  layer.addChild(icon)
+}
+
 function drawTinyKing(layer: Container, position: Vector, scale: number, stepTime: number): void {
   const bob = Math.sin(stepTime) * 2 * scale
   const x = Math.round(position.x)
@@ -425,13 +558,14 @@ function drawHazard(layer: Container, hazard: Hazard): void {
   const x = Math.round(hazard.position.x)
   const y = Math.round(hazard.position.y)
   const alpha = hazard.state === 'fleeing' ? 0.72 : 1
+  const color = hazard.hitFlash > 0 ? PALETTE.dangerLight : PALETTE.danger
   const hazardGraphic = new Graphics()
     .rect(x - 16, y - 10, 32, 22)
-    .fill({ color: PALETTE.danger, alpha })
+    .fill({ color, alpha })
     .rect(x - 20, y - 3, 8, 12)
-    .fill({ color: PALETTE.danger, alpha })
+    .fill({ color, alpha })
     .rect(x + 12, y - 3, 8, 12)
-    .fill({ color: PALETTE.danger, alpha })
+    .fill({ color, alpha })
     .rect(x - 8, y - 16, 6, 7)
     .fill({ color: PALETTE.dangerLight, alpha })
     .rect(x + 2, y - 16, 6, 7)
@@ -440,7 +574,51 @@ function drawHazard(layer: Container, hazard: Hazard): void {
     .fill(PALETTE.gold)
     .rect(x + 4, y - 4, 4, 4)
     .fill(PALETTE.gold)
+    .rect(x - 18, y + 17, 36, 5)
+    .fill(PALETTE.panelDark)
+    .rect(x - 18, y + 17, 36 * Math.max(0, hazard.health / hazard.maxHealth), 5)
+    .fill(PALETTE.dangerLight)
   layer.addChild(hazardGraphic)
+}
+
+function drawSpawnWarning(layer: Container, warning: SpawnWarning): void {
+  const progress = warning.timer / warning.maxTimer
+  const pulse = Math.sin(progress * Math.PI * 8) * 0.5 + 0.5
+  const marker = new Graphics()
+    .rect(warning.position.x - 15, warning.position.y - 22, 30, 30)
+    .fill({ color: PALETTE.danger, alpha: 0.35 + pulse * 0.3 })
+    .rect(warning.position.x - 3, warning.position.y - 18, 6, 18)
+    .fill(PALETTE.white)
+    .rect(warning.position.x - 3, warning.position.y + 4, 6, 6)
+    .fill(PALETTE.white)
+  layer.addChild(marker)
+}
+
+function drawAttackEffect(layer: Container, effect: AttackEffect): void {
+  const alpha = effect.life / effect.maxLife
+  const beam = new Graphics()
+    .moveTo(effect.from.x, effect.from.y - 24)
+    .lineTo(effect.to.x, effect.to.y - 8)
+    .stroke({ color: effect.color, alpha, width: 4 })
+    .moveTo(effect.to.x - 6, effect.to.y - 8)
+    .lineTo(effect.to.x + 6, effect.to.y - 8)
+    .moveTo(effect.to.x, effect.to.y - 14)
+    .lineTo(effect.to.x, effect.to.y - 2)
+    .stroke({ color: PALETTE.white, alpha, width: 2 })
+  layer.addChild(beam)
+}
+
+function drawCampHitFlash(layer: Container, flash: number): void {
+  if (flash <= 0) return
+
+  const camp = tileToScreen({ column: Math.floor(WORLD_COLUMNS / 2), row: Math.floor(WORLD_ROWS / 2) })
+  const alpha = Math.min(0.5, flash * 1.2)
+  const marker = new Graphics()
+    .rect(camp.x - 36, camp.y - 34, 72, 72)
+    .stroke({ color: PALETTE.dangerLight, alpha, width: 5 })
+    .rect(camp.x - 24, camp.y - 22, 48, 48)
+    .fill({ color: PALETTE.dangerLight, alpha: alpha * 0.22 })
+  layer.addChild(marker)
 }
 
 function drawTree(layer: Container, x: number, y: number, scale: number): void {
@@ -529,4 +707,10 @@ function resourceColor(kind: ResourceKind): number {
   if (kind === 'stone') return PALETTE.stone
   if (kind === 'food') return PALETTE.berry
   return PALETTE.gold
+}
+
+function priorityColor(priority: TaskPriority): number {
+  if (priority === 'gather') return PALETTE.forest
+  if (priority === 'build') return PALETTE.wood
+  return PALETTE.blue
 }

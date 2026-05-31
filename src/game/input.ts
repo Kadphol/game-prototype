@@ -1,6 +1,6 @@
-import type { BuildingKind, Vector } from './types'
+import type { BuildingKind, TaskPriority, Vector } from './types'
 
-type InputAction = 'interact' | 'place' | 'start' | 'restart'
+type InputAction = 'place' | 'start' | 'restart'
 
 export class InputController {
   private readonly pressed = new Set<string>()
@@ -22,16 +22,16 @@ export class InputController {
     this.justPressed.clear()
   }
 
-  movement(): Vector {
-    const x = this.axis('arrowleft', 'a', 'arrowright', 'd')
-    const y = this.axis('arrowup', 'w', 'arrowdown', 's')
+  consumeCursorDelta(): Vector {
+    let x = 0
+    let y = 0
 
-    if (x === 0 && y === 0) {
-      return { x: 0, y: 0 }
-    }
+    if (this.wasPressed('arrowleft') || this.wasPressed('a')) x -= 1
+    if (this.wasPressed('arrowright') || this.wasPressed('d')) x += 1
+    if (this.wasPressed('arrowup') || this.wasPressed('w')) y -= 1
+    if (this.wasPressed('arrowdown') || this.wasPressed('s')) y += 1
 
-    const length = Math.hypot(x, y)
-    return { x: x / length, y: y / length }
+    return { x, y }
   }
 
   consumeAction(action: InputAction): boolean {
@@ -51,17 +51,25 @@ export class InputController {
     return undefined
   }
 
-  private axis(negativeArrow: string, negativeWasd: string, positiveArrow: string, positiveWasd: string): number {
-    const negative = this.pressed.has(negativeArrow) || this.pressed.has(negativeWasd)
-    const positive = this.pressed.has(positiveArrow) || this.pressed.has(positiveWasd)
-    if (negative === positive) return 0
-    return positive ? 1 : -1
+  consumePrioritySelection(): TaskPriority | undefined {
+    if (this.justPressed.has('g')) return 'gather'
+    if (this.justPressed.has('b')) return 'build'
+    if (this.justPressed.has('f')) return 'defend'
+    return undefined
+  }
+
+  consumePriorityCycle(): number {
+    if (this.justPressed.has('q')) return -1
+    if (this.justPressed.has('e')) return 1
+    return 0
+  }
+
+  private wasPressed(key: string): boolean {
+    return this.justPressed.has(key)
   }
 
   private actionKeys(action: InputAction): string[] {
     switch (action) {
-      case 'interact':
-        return ['e']
       case 'place':
         return [' ', 'enter']
       case 'start':
@@ -85,7 +93,9 @@ export class InputController {
       key === 'w' ||
       key === 'a' ||
       key === 's' ||
-      key === 'd'
+      key === 'd' ||
+      key === 'q' ||
+      key === 'e'
     ) {
       event.preventDefault()
     }

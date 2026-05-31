@@ -1,12 +1,15 @@
 import {
   BUILDINGS,
   DAY_LENGTH_SECONDS,
-  INTERACTION_RANGE,
-  KING_SPEED,
+  DEFENDER_SPEED,
   MAX_DAYS,
+  MAX_VISIBLE_VILLAGERS,
   PALETTE,
   STARTING_MORALE,
   TILE_SIZE,
+  TOWER_DAMAGE_PER_SECOND,
+  TOWER_RANGE,
+  VILLAGER_SPEED,
   WIN_PROSPERITY,
   WORLD_COLUMNS,
   WORLD_OFFSET_X,
@@ -14,8 +17,10 @@ import {
   WORLD_ROWS,
 } from './config'
 import type {
+  AttackEffect,
   Building,
   BuildingKind,
+  CommandCursor,
   FloatingText,
   GameResult,
   GameSnapshot,
@@ -24,17 +29,25 @@ import type {
   ResourceKind,
   ResourceNode,
   ResourceStock,
+  SpawnWarning,
+  TaskPriority,
   Terrain,
   Tile,
   Vector,
+  Villager,
+  VillagerTask,
 } from './types'
 
 const STARTING_RESOURCES: ResourceStock = {
-  wood: 28,
-  stone: 14,
-  food: 22,
-  gold: 8,
+  wood: 36,
+  stone: 20,
+  food: 26,
+  gold: 11,
 }
+
+const PRIORITIES: TaskPriority[] = ['gather', 'build', 'defend']
+const CAMP_COLUMN = Math.floor(WORLD_COLUMNS / 2)
+const CAMP_ROW = Math.floor(WORLD_ROWS / 2)
 
 interface WorldState {
   resources: ResourceStock
@@ -43,38 +56,45 @@ interface WorldState {
   prosperity: number
   day: number
   dayTimer: number
+  priority: TaskPriority
   selectedBuilding: BuildingKind
   statusMessage: string
   statusTimer: number
-  player: {
+  king: {
     position: Vector
     facing: Vector
     stepTime: number
   }
+  commandCursor: CommandCursor
   tiles: Tile[]
   nodes: ResourceNode[]
   buildings: Building[]
+  villagers: Villager[]
   hazards: Hazard[]
+  spawnWarnings: SpawnWarning[]
+  attackEffects: AttackEffect[]
   floatingTexts: FloatingText[]
   particles: Particle[]
   result?: GameResult
   nextId: number
   hazardSpawnTimer: number
   cameraShake: number
+  campHitFlash: number
 }
 
 export interface WorldInput {
-  movement: Vector
-  gather: boolean
+  cursorDelta: Vector
   place: boolean
   selectedBuilding?: BuildingKind
+  selectedPriority?: TaskPriority
+  priorityCycle: number
 }
 
 export class KingdomWorld {
   private state = this.createInitialState()
 
   snapshot(): GameSnapshot {
-    const hoveredTile = this.tileAtWorld(this.state.player.position)
+    const hoveredTile = this.tileAtCursor(this.state.commandCursor)
     return {
       phase: this.state.result ? 'gameOver' : 'playing',
       result: this.state.result,
@@ -84,23 +104,29 @@ export class KingdomWorld {
       prosperity: this.state.prosperity,
       day: this.state.day,
       dayTimer: this.state.dayTimer,
+      priority: this.state.priority,
       selectedBuilding: this.state.selectedBuilding,
       statusMessage: this.state.statusMessage,
       statusTimer: this.state.statusTimer,
-      player: {
-        position: { ...this.state.player.position },
-        facing: { ...this.state.player.facing },
-        stepTime: this.state.player.stepTime,
+      king: {
+        position: { ...this.state.king.position },
+        facing: { ...this.state.king.facing },
+        stepTime: this.state.king.stepTime,
       },
+      commandCursor: { ...this.state.commandCursor },
       tiles: this.state.tiles,
       nodes: this.state.nodes,
       buildings: this.state.buildings,
+      villagers: this.state.villagers,
       hazards: this.state.hazards,
+      spawnWarnings: this.state.spawnWarnings,
+      attackEffects: this.state.attackEffects,
       floatingTexts: this.state.floatingTexts,
       particles: this.state.particles,
       hoveredTile,
       canPlaceHovered: hoveredTile ? this.canPlaceOnTile(hoveredTile, this.state.selectedBuilding) : false,
       cameraShake: this.state.cameraShake,
+      campHitFlash: this.state.campHitFlash,
     }
   }
 
@@ -109,22 +135,17 @@ export class KingdomWorld {
   }
 
   update(deltaSeconds: number, input: WorldInput): void {
-    if (this.state.result) {
-      return
-    }
+    if (this.state.result) return
 
-    // Order matters: player intent is resolved first, then passive systems advance.
     this.updateSelection(input)
-    this.updatePlayer(deltaSeconds, input.movement)
-
-    if (input.gather) {
-      this.tryGather()
-    }
+    this.updateCommandCursor(deltaSeconds, input.cursorDelta)
 
     if (input.place) {
       this.tryPlaceBuilding()
     }
 
+    this.ensureVillagerCount()
+    this.updateVillagers(deltaSeconds)
     this.updateBuildings(deltaSeconds)
     this.updateHazards(deltaSeconds)
     this.updateResourceRespawns(deltaSeconds)
@@ -135,28 +156,40 @@ export class KingdomWorld {
 
   private createInitialState(): WorldState {
     const tiles = createTiles()
-    const campColumn = Math.floor(WORLD_COLUMNS / 2)
-    const campRow = Math.floor(WORLD_ROWS / 2)
-    const campTile = tiles.find((tile) => tile.column === campColumn && tile.row === campRow)
+    const campTile = tiles.find((tile) => tile.column === CAMP_COLUMN && tile.row === CAMP_ROW)
     const campId = 1
     if (campTile) {
       campTile.buildingId = campId
     }
 
+    const camp = tileCenter(CAMP_COLUMN, CAMP_ROW)
+    const villagers = Array.from({ length: 4 }, (_, index) =>
+      createVillager(index + 2, {
+        x: camp.x + (index - 1.5) * 13,
+        y: camp.y + 42 + (index % 2) * 8,
+      })
+    )
+
     return {
       resources: { ...STARTING_RESOURCES },
       morale: STARTING_MORALE,
-      population: 3,
+      population: 4,
       prosperity: 10,
       day: 1,
       dayTimer: DAY_LENGTH_SECONDS,
+      priority: 'gather',
       selectedBuilding: 'hut',
-      statusMessage: 'Gather, build, and keep morale high.',
-      statusTimer: 4,
-      player: {
-        position: tileCenter(campColumn + 1, campRow),
+      statusMessage: 'Villagers work automatically. Set priority and place buildings.',
+      statusTimer: 4.5,
+      king: {
+        position: { x: camp.x + 6, y: camp.y + 36 },
         facing: { x: 0, y: 1 },
         stepTime: 0,
+      },
+      commandCursor: {
+        column: CAMP_COLUMN + 1,
+        row: CAMP_ROW,
+        pulse: 0,
       },
       tiles,
       nodes: createResourceNodes(),
@@ -164,82 +197,81 @@ export class KingdomWorld {
         {
           id: campId,
           kind: 'hut',
-          column: campColumn,
-          row: campRow,
+          column: CAMP_COLUMN,
+          row: CAMP_ROW,
           age: 0,
           pulse: 0,
+          complete: true,
+          buildProgress: BUILDINGS.hut.buildTime,
+          buildTime: BUILDINGS.hut.buildTime,
           productionTimer: 0,
+          attackCooldown: 0,
         },
       ],
+      villagers,
       hazards: [],
+      spawnWarnings: [],
+      attackEffects: [],
       floatingTexts: [],
       particles: [],
-      nextId: 2,
-      hazardSpawnTimer: 9,
+      nextId: 20,
+      hazardSpawnTimer: DAY_LENGTH_SECONDS * 0.62,
       cameraShake: 0,
+      campHitFlash: 0,
     }
   }
 
   private updateSelection(input: WorldInput): void {
-    if (!input.selectedBuilding) return
+    if (input.selectedBuilding) {
+      this.state.selectedBuilding = input.selectedBuilding
+      const definition = BUILDINGS[input.selectedBuilding]
+      this.setStatus(`${definition.hotkey}: ${definition.label} selected - ${definition.description}`, 2.4)
+    }
 
-    this.state.selectedBuilding = input.selectedBuilding
-    const definition = BUILDINGS[input.selectedBuilding]
-    this.setStatus(`${definition.hotkey}: ${definition.label} selected - ${definition.description}`, 2.4)
+    if (input.selectedPriority) {
+      this.setPriority(input.selectedPriority)
+    } else if (input.priorityCycle !== 0) {
+      const current = PRIORITIES.indexOf(this.state.priority)
+      const next = (current + input.priorityCycle + PRIORITIES.length) % PRIORITIES.length
+      this.setPriority(PRIORITIES[next])
+    }
   }
 
-  private updatePlayer(deltaSeconds: number, movement: Vector): void {
-    if (movement.x !== 0 || movement.y !== 0) {
-      this.state.player.facing = movement
-      this.state.player.stepTime += deltaSeconds * 9
-    }
+  private setPriority(priority: TaskPriority): void {
+    if (priority === this.state.priority) return
 
-    const nextPosition = {
-      x: this.state.player.position.x + movement.x * KING_SPEED * deltaSeconds,
-      y: this.state.player.position.y + movement.y * KING_SPEED * deltaSeconds,
+    this.state.priority = priority
+    for (const villager of this.state.villagers) {
+      if (villager.task.kind === 'idle' || villager.pauseTimer > 0.2) {
+        villager.pauseTimer = 0
+        villager.task = { kind: 'idle' }
+      }
     }
-
-    const clamped = clampToWorld(nextPosition)
-    const nextTile = this.tileAtWorld(clamped)
-    if (!nextTile || nextTile.terrain === 'water') {
-      return
-    }
-
-    this.state.player.position = clamped
+    this.setStatus(`Priority: ${priority.toUpperCase()}. Villagers retask as they finish jobs.`, 2.4)
   }
 
-  private tryGather(): void {
-    const nearest = this.findNearestGatherableNode()
-    if (!nearest) {
-      this.failAtPlayer('No resource in reach')
-      return
-    }
+  private updateCommandCursor(deltaSeconds: number, cursorDelta: Vector): void {
+    this.state.commandCursor.pulse += deltaSeconds * 5
+    if (cursorDelta.x === 0 && cursorDelta.y === 0) return
 
-    const gathered = Math.min(nearest.amount, gatherAmountFor(nearest.kind))
-    nearest.amount -= gathered
-    this.state.resources[nearest.kind] += gathered
-    this.addFloatingText(`+${gathered} ${nearest.kind}`, tileCenter(nearest.column, nearest.row), resourceColor(nearest.kind))
-    this.spawnSparkles(tileCenter(nearest.column, nearest.row), resourceColor(nearest.kind), 8)
-    this.setStatus(`Gathered ${nearest.kind}.`, 1.6)
-
-    if (nearest.amount <= 0) {
-      nearest.respawnTimer = respawnTimeFor(nearest.kind)
-      this.addFloatingText('depleted', tileCenter(nearest.column, nearest.row), PALETTE.parchmentDark)
-    }
+    const nextColumn = clamp(this.state.commandCursor.column + Math.sign(cursorDelta.x), 1, WORLD_COLUMNS - 2)
+    const nextRow = clamp(this.state.commandCursor.row + Math.sign(cursorDelta.y), 1, WORLD_ROWS - 2)
+    this.state.commandCursor.column = nextColumn
+    this.state.commandCursor.row = nextRow
   }
 
   private tryPlaceBuilding(): void {
-    const tile = this.tileAtWorld(this.state.player.position)
+    const tile = this.tileAtCursor(this.state.commandCursor)
     const kind = this.state.selectedBuilding
 
     if (!tile || !this.isBuildableTile(tile)) {
-      this.failAtPlayer('Cannot build here')
+      this.failAtCursor('Cannot build here')
       return
     }
 
     const definition = BUILDINGS[kind]
     if (!canAfford(this.state.resources, definition.cost)) {
-      this.failAtPlayer(`Need ${formatCost(definition.cost)}`)
+      this.failAtCursor(`Need ${formatCost(definition.cost)}`)
       return
     }
 
@@ -251,33 +283,215 @@ export class KingdomWorld {
       row: tile.row,
       age: 0,
       pulse: 1,
-      productionTimer: kind === 'farm' ? 4 : 0,
+      complete: false,
+      buildProgress: 0,
+      buildTime: definition.buildTime,
+      productionTimer: kind === 'farm' ? 5 : 0,
+      attackCooldown: 0,
     }
     tile.buildingId = building.id
     this.state.buildings.push(building)
-    this.state.prosperity += definition.prosperity
+    this.addFloatingText('planned', tileCenter(tile.column, tile.row), PALETTE.gold)
+    this.spawnSparkles(tileCenter(tile.column, tile.row), PALETTE.gold, 8)
+    this.setStatus(`${definition.label} planned. Builders will finish it.`, 2.2)
+  }
 
-    if (kind === 'hut') {
-      this.state.population += 1
-      this.state.morale = Math.min(100, this.state.morale + 4)
+  private ensureVillagerCount(): void {
+    const target = Math.min(this.state.population, MAX_VISIBLE_VILLAGERS)
+    const camp = tileCenter(CAMP_COLUMN, CAMP_ROW)
+    while (this.state.villagers.length < target) {
+      const index = this.state.villagers.length
+      const villager = createVillager(this.state.nextId++, {
+        x: camp.x + (index - 2) * 13,
+        y: camp.y + 48 + (index % 2) * 8,
+      })
+      this.state.villagers.push(villager)
+      this.addFloatingText('new villager', villager.position, PALETTE.parchment)
+    }
+  }
+
+  private updateVillagers(deltaSeconds: number): void {
+    const camp = tileCenter(CAMP_COLUMN, CAMP_ROW)
+
+    for (const villager of this.state.villagers) {
+      villager.stepTime += deltaSeconds * 8
+      villager.pauseTimer = Math.max(0, villager.pauseTimer - deltaSeconds)
+      villager.workTimer = Math.max(0, villager.workTimer - deltaSeconds)
+
+      if (villager.task.kind === 'idle' && villager.pauseTimer <= 0) {
+        villager.task = this.chooseTaskForVillager(villager)
+        villager.target = this.targetForTask(villager.task, villager)
+      }
+
+      if (villager.pauseTimer > 0) continue
+
+      this.moveVillagerToward(villager, villager.target, deltaSeconds)
+
+      if (distance(villager.position, villager.target) < 12) {
+        this.resolveVillagerArrival(villager, camp)
+      }
+    }
+  }
+
+  private chooseTaskForVillager(villager: Villager): VillagerTask {
+    const unfinished = this.state.buildings.filter((building) => !building.complete)
+    const activeHazards = this.state.hazards.filter((hazard) => hazard.state === 'raiding')
+
+    if (this.state.priority === 'build' && unfinished.length > 0 && villager.id % 4 !== 0) {
+      return { kind: 'build', targetBuildingId: nearestBuildingId(villager.position, unfinished) }
     }
 
-    this.addFloatingText(`+${definition.prosperity} prosperity`, tileCenter(tile.column, tile.row), PALETTE.gold)
-    this.spawnSparkles(tileCenter(tile.column, tile.row), PALETTE.gold, 14)
-    this.setStatus(`${definition.label} raised!`, 2)
+    if (this.state.priority === 'defend' && (activeHazards.length > 0 || this.hasCompleteTower()) && villager.id % 4 !== 1) {
+      return { kind: 'defend', targetHazardId: nearestHazardId(villager.position, activeHazards) }
+    }
+
+    if (this.state.priority === 'gather' || villager.id % 3 !== 0) {
+      const node = this.pickGatherNode(villager.position)
+      if (node) return { kind: 'gather', targetNodeId: node.id, phase: 'toTarget' }
+    }
+
+    if (unfinished.length > 0) {
+      return { kind: 'build', targetBuildingId: nearestBuildingId(villager.position, unfinished) }
+    }
+
+    if (activeHazards.length > 0 || this.hasCompleteTower()) {
+      return { kind: 'defend', targetHazardId: nearestHazardId(villager.position, activeHazards) }
+    }
+
+    return { kind: 'idle' }
+  }
+
+  private targetForTask(task: VillagerTask, villager: Villager): Vector {
+    const camp = tileCenter(CAMP_COLUMN, CAMP_ROW)
+
+    if (task.kind === 'gather' && task.targetNodeId) {
+      const node = this.state.nodes.find((candidate) => candidate.id === task.targetNodeId && candidate.amount > 0)
+      if (node) return offsetTarget(tileCenter(node.column, node.row), villager.id)
+    }
+
+    if (task.kind === 'build' && task.targetBuildingId) {
+      const building = this.state.buildings.find((candidate) => candidate.id === task.targetBuildingId && !candidate.complete)
+      if (building) return offsetTarget(tileCenter(building.column, building.row), villager.id)
+    }
+
+    if (task.kind === 'defend') {
+      const hazard = this.state.hazards.find((candidate) => candidate.id === task.targetHazardId && candidate.state === 'raiding')
+      if (hazard) return { ...hazard.position }
+      const tower = this.nearestCompleteTower(villager.position)
+      if (tower) return offsetTarget(tileCenter(tower.column, tower.row), villager.id)
+      return offsetTarget(camp, villager.id)
+    }
+
+    return offsetTarget(camp, villager.id)
+  }
+
+  private moveVillagerToward(villager: Villager, target: Vector, deltaSeconds: number): void {
+    const direction = normalize({ x: target.x - villager.position.x, y: target.y - villager.position.y })
+    const speed = villager.task.kind === 'defend' ? DEFENDER_SPEED : villager.speed
+    villager.position.x += direction.x * speed * deltaSeconds
+    villager.position.y += direction.y * speed * deltaSeconds
+  }
+
+  private resolveVillagerArrival(villager: Villager, camp: Vector): void {
+    if (villager.task.kind === 'gather') {
+      if (villager.task.phase === 'toCamp' && villager.carried) {
+        this.state.resources[villager.carried] += villager.carriedAmount
+        this.addFloatingText(`+${villager.carriedAmount} ${villager.carried}`, villager.position, resourceColor(villager.carried))
+        this.spawnSparkles(villager.position, resourceColor(villager.carried), 5)
+        villager.carried = undefined
+        villager.carriedAmount = 0
+        villager.task = { kind: 'idle' }
+        villager.pauseTimer = 0.45
+        return
+      }
+
+      const node = this.state.nodes.find((candidate) => candidate.id === villager.task.targetNodeId && candidate.amount > 0)
+      if (!node) {
+        villager.task = { kind: 'idle' }
+        return
+      }
+
+      const gathered = Math.min(node.amount, gatherAmountFor(node.kind))
+      node.amount -= gathered
+      villager.carried = node.kind
+      villager.carriedAmount = gathered
+      villager.task.phase = 'toCamp'
+      villager.target = offsetTarget(camp, villager.id)
+      this.addFloatingText(`+${gathered}`, tileCenter(node.column, node.row), resourceColor(node.kind))
+      this.spawnSparkles(tileCenter(node.column, node.row), resourceColor(node.kind), 4)
+      if (node.amount <= 0) {
+        node.respawnTimer = respawnTimeFor(node.kind)
+      }
+      return
+    }
+
+    if (villager.task.kind === 'build') {
+      const building = this.state.buildings.find((candidate) => candidate.id === villager.task.targetBuildingId && !candidate.complete)
+      if (!building) {
+        villager.task = { kind: 'idle' }
+        return
+      }
+
+      building.buildProgress += 0.52
+      building.pulse = Math.max(building.pulse, 0.35)
+      villager.pauseTimer = 0.28
+      this.spawnSparkles(tileCenter(building.column, building.row), PALETTE.parchment, 1)
+      if (building.buildProgress >= building.buildTime) {
+        this.completeBuilding(building)
+        villager.task = { kind: 'idle' }
+      }
+      return
+    }
+
+    if (villager.task.kind === 'defend') {
+      const hazard = this.state.hazards.find((candidate) => candidate.id === villager.task.targetHazardId && candidate.state === 'raiding')
+      if (hazard && distance(villager.position, hazard.position) < 38 && villager.workTimer <= 0) {
+        villager.workTimer = 0.55
+        this.damageHazard(hazard, 9, villager.position, PALETTE.blue)
+        villager.pauseTimer = 0.16
+        return
+      }
+
+      villager.target = this.targetForTask(villager.task, villager)
+      villager.task = this.state.priority === 'defend' ? villager.task : { kind: 'idle' }
+      villager.pauseTimer = 0.35
+      return
+    }
+
+    villager.target = offsetTarget(camp, villager.id)
+    villager.pauseTimer = 0.65
+  }
+
+  private completeBuilding(building: Building): void {
+    const definition = BUILDINGS[building.kind]
+    building.complete = true
+    building.buildProgress = building.buildTime
+    building.pulse = 1.1
+    this.state.prosperity += definition.prosperity
+
+    if (building.kind === 'hut') {
+      this.state.population += 1
+      this.state.morale = Math.min(100, this.state.morale + 5)
+    }
+
+    this.addFloatingText(`+${definition.prosperity} prosperity`, tileCenter(building.column, building.row), PALETTE.gold)
+    this.spawnSparkles(tileCenter(building.column, building.row), PALETTE.gold, 16)
+    this.setStatus(`${definition.label} completed!`, 2.1)
   }
 
   private updateBuildings(deltaSeconds: number): void {
     for (const building of this.state.buildings) {
       building.age += deltaSeconds
       building.pulse = Math.max(0, building.pulse - deltaSeconds * 2.8)
+      building.attackCooldown = Math.max(0, building.attackCooldown - deltaSeconds)
 
-      if (building.kind === 'farm') {
+      if (building.complete && building.kind === 'farm') {
         building.productionTimer -= deltaSeconds
         if (building.productionTimer <= 0) {
-          building.productionTimer = 7.5
-          this.state.resources.food += 3
-          this.addFloatingText('+3 food', tileCenter(building.column, building.row), PALETTE.berry)
+          building.productionTimer = 6.5
+          this.state.resources.food += 5
+          this.addFloatingText('+5 food', tileCenter(building.column, building.row), PALETTE.berry)
+          this.spawnSparkles(tileCenter(building.column, building.row), PALETTE.berry, 4)
         }
       }
     }
@@ -287,56 +501,117 @@ export class KingdomWorld {
     this.state.hazardSpawnTimer -= deltaSeconds
     const isNight = this.state.dayTimer < DAY_LENGTH_SECONDS * 0.35
     if (isNight && this.state.hazardSpawnTimer <= 0) {
-      this.spawnHazard()
-      this.state.hazardSpawnTimer = Math.max(4.8, 11 - this.state.day * 1.2)
+      this.createSpawnWarning()
+      this.state.hazardSpawnTimer = Math.max(5.8, 10.5 - this.state.day * 0.9)
     }
 
-    const camp = tileCenter(Math.floor(WORLD_COLUMNS / 2), Math.floor(WORLD_ROWS / 2))
-    const towers = this.state.buildings.filter((building) => building.kind === 'tower')
+    this.updateSpawnWarnings(deltaSeconds)
+    this.updateTowerAttacks(deltaSeconds)
 
+    const camp = tileCenter(CAMP_COLUMN, CAMP_ROW)
     for (const hazard of this.state.hazards) {
       hazard.attackCooldown = Math.max(0, hazard.attackCooldown - deltaSeconds)
-      const repelTower = towers.find((tower) => distance(hazard.position, tileCenter(tower.column, tower.row)) < 150)
+      hazard.hitFlash = Math.max(0, hazard.hitFlash - deltaSeconds)
 
-      // Towers are deliberately simple: proximity flips hazards into a fleeing state.
-      if (repelTower) {
-        hazard.state = 'fleeing'
-        hazard.health -= deltaSeconds * 34
-        this.spawnSparkles(hazard.position, PALETTE.gold, 1)
-        if (hazard.health <= 0) {
-          this.state.resources.gold += 2
-          this.addFloatingText('+2 gold', hazard.position, PALETTE.gold)
-        }
-      }
-
-      const target =
-        hazard.state === 'fleeing'
-          ? { x: hazard.position.x + (hazard.position.x - camp.x), y: hazard.position.y + (hazard.position.y - camp.y) }
-          : camp
-
+      const target = hazard.state === 'fleeing'
+        ? { x: hazard.position.x + (hazard.position.x - camp.x), y: hazard.position.y + (hazard.position.y - camp.y) }
+        : camp
       const direction = normalize({ x: target.x - hazard.position.x, y: target.y - hazard.position.y })
       hazard.position.x += direction.x * hazard.speed * deltaSeconds
       hazard.position.y += direction.y * hazard.speed * deltaSeconds
 
-      if (hazard.state === 'raiding' && distance(hazard.position, camp) < 32 && hazard.attackCooldown <= 0) {
-        hazard.attackCooldown = 2.6
-        this.state.morale = Math.max(0, this.state.morale - 14)
-        this.state.resources.food = Math.max(0, this.state.resources.food - 4)
-        this.state.cameraShake = 0.32
-        this.addFloatingText('-morale', camp, PALETTE.dangerLight)
-        this.spawnSparkles(camp, PALETTE.dangerLight, 10)
-        this.setStatus('A night raider reached the camp!', 2.4)
+      if (hazard.state === 'raiding' && distance(hazard.position, camp) < 34 && hazard.attackCooldown <= 0) {
+        hazard.attackCooldown = 2.8
+        hazard.state = 'fleeing'
+        hazard.health -= 8
+        this.state.morale = Math.max(0, this.state.morale - 13)
+        this.state.resources.food = Math.max(0, this.state.resources.food - 3)
+        this.state.cameraShake = 0.46
+        this.state.campHitFlash = 0.42
+        this.addFloatingText('-13 morale', camp, PALETTE.dangerLight)
+        this.spawnSparkles(camp, PALETTE.dangerLight, 18)
+        this.setStatus('Raiders hit the camp. Defend priority helps towers.', 2.8)
       }
     }
 
     this.state.hazards = this.state.hazards.filter((hazard) => {
       const outside =
-        hazard.position.x < WORLD_OFFSET_X - 120 ||
-        hazard.position.x > WORLD_OFFSET_X + WORLD_COLUMNS * TILE_SIZE + 120 ||
-        hazard.position.y < WORLD_OFFSET_Y - 120 ||
-        hazard.position.y > WORLD_OFFSET_Y + WORLD_ROWS * TILE_SIZE + 120
-      return hazard.health > 0 && !(hazard.state === 'fleeing' && outside)
+        hazard.position.x < WORLD_OFFSET_X - 140 ||
+        hazard.position.x > WORLD_OFFSET_X + WORLD_COLUMNS * TILE_SIZE + 140 ||
+        hazard.position.y < WORLD_OFFSET_Y - 140 ||
+        hazard.position.y > WORLD_OFFSET_Y + WORLD_ROWS * TILE_SIZE + 140
+      if (hazard.health <= 0) {
+        this.defeatHazard(hazard)
+        return false
+      }
+      return !(hazard.state === 'fleeing' && outside)
     })
+  }
+
+  private updateSpawnWarnings(deltaSeconds: number): void {
+    for (const warning of this.state.spawnWarnings) {
+      warning.timer -= deltaSeconds
+      if (warning.timer <= 0) {
+        this.spawnHazard(warning.position)
+      }
+    }
+    this.state.spawnWarnings = this.state.spawnWarnings.filter((warning) => warning.timer > 0)
+  }
+
+  private updateTowerAttacks(deltaSeconds: number): void {
+    const damageBoost = this.state.priority === 'defend' ? 1.35 : 1
+    for (const tower of this.state.buildings.filter((building) => building.complete && building.kind === 'tower')) {
+      const towerCenter = tileCenter(tower.column, tower.row)
+      const target = nearestHazard(towerCenter, this.state.hazards.filter((hazard) => hazard.state === 'raiding' && distance(towerCenter, hazard.position) < TOWER_RANGE))
+      if (!target) continue
+
+      target.health -= TOWER_DAMAGE_PER_SECOND * damageBoost * deltaSeconds
+      target.hitFlash = 0.16
+      if (tower.attackCooldown <= 0) {
+        tower.attackCooldown = 0.22
+        this.addAttackEffect(towerCenter, target.position, PALETTE.gold)
+        this.spawnSparkles(target.position, PALETTE.gold, 3)
+      }
+    }
+  }
+
+  private createSpawnWarning(): void {
+    const position = randomEdgePosition()
+    this.state.spawnWarnings.push({
+      id: this.state.nextId++,
+      position,
+      timer: 2.9,
+      maxTimer: 2.9,
+    })
+    this.setStatus('Enemy warning at the border.', 1.8)
+  }
+
+  private spawnHazard(position: Vector): void {
+    this.state.hazards.push({
+      id: this.state.nextId++,
+      position: { ...position },
+      speed: 54 + this.state.day * 5,
+      health: 42 + this.state.day * 7,
+      maxHealth: 42 + this.state.day * 7,
+      state: 'raiding',
+      attackCooldown: 0,
+      hitFlash: 0,
+    })
+    this.setStatus('Raiders are moving toward camp.', 2.2)
+  }
+
+  private damageHazard(hazard: Hazard, amount: number, from: Vector, color: number): void {
+    hazard.health -= amount
+    hazard.hitFlash = 0.16
+    this.addAttackEffect(from, hazard.position, color)
+    this.spawnSparkles(hazard.position, color, 3)
+  }
+
+  private defeatHazard(hazard: Hazard): void {
+    this.state.resources.gold += 3
+    this.addFloatingText('+3 gold', hazard.position, PALETTE.gold)
+    this.spawnSparkles(hazard.position, PALETTE.gold, 18)
+    this.state.cameraShake = Math.max(this.state.cameraShake, 0.16)
   }
 
   private updateResourceRespawns(deltaSeconds: number): void {
@@ -353,9 +628,7 @@ export class KingdomWorld {
 
   private updateDay(deltaSeconds: number): void {
     this.state.dayTimer -= deltaSeconds
-    if (this.state.dayTimer > 0) {
-      return
-    }
+    if (this.state.dayTimer > 0) return
 
     if (this.state.day >= MAX_DAYS) {
       this.endGame(false, 'The final night passed before the kingdom was restored.')
@@ -364,13 +637,16 @@ export class KingdomWorld {
 
     this.state.day += 1
     this.state.dayTimer = DAY_LENGTH_SECONDS
-    const huts = this.state.buildings.filter((building) => building.kind === 'hut').length
+    this.state.hazardSpawnTimer = DAY_LENGTH_SECONDS * 0.58
+    const huts = this.state.buildings.filter((building) => building.complete && building.kind === 'hut').length
     const dawnGold = 4 + huts * 2
     const foodCost = Math.max(1, this.state.population)
     this.state.resources.gold += dawnGold
     this.state.resources.food = Math.max(0, this.state.resources.food - foodCost)
+
     if (this.state.resources.food <= 0) {
       this.state.morale = Math.max(0, this.state.morale - 12)
+      this.state.campHitFlash = 0.25
       this.setStatus(`Day ${this.state.day}: food ran short, morale dropped.`, 2.8)
     } else {
       this.state.morale = Math.min(100, this.state.morale + 5)
@@ -381,6 +657,7 @@ export class KingdomWorld {
   private updateEffects(deltaSeconds: number): void {
     this.state.statusTimer = Math.max(0, this.state.statusTimer - deltaSeconds)
     this.state.cameraShake = Math.max(0, this.state.cameraShake - deltaSeconds)
+    this.state.campHitFlash = Math.max(0, this.state.campHitFlash - deltaSeconds)
 
     for (const text of this.state.floatingTexts) {
       text.position.y -= deltaSeconds * 28
@@ -394,6 +671,11 @@ export class KingdomWorld {
       particle.life -= deltaSeconds
     }
     this.state.particles = this.state.particles.filter((particle) => particle.life > 0)
+
+    for (const effect of this.state.attackEffects) {
+      effect.life -= deltaSeconds
+    }
+    this.state.attackEffects = this.state.attackEffects.filter((effect) => effect.life > 0)
   }
 
   private checkEndConditions(): void {
@@ -418,46 +700,31 @@ export class KingdomWorld {
     }
   }
 
-  private spawnHazard(): void {
-    const side = Math.floor(Math.random() * 4)
-    const minX = WORLD_OFFSET_X
-    const maxX = WORLD_OFFSET_X + WORLD_COLUMNS * TILE_SIZE
-    const minY = WORLD_OFFSET_Y
-    const maxY = WORLD_OFFSET_Y + WORLD_ROWS * TILE_SIZE
-    const position =
-      side === 0
-        ? { x: minX - 32, y: randomBetween(minY, maxY) }
-        : side === 1
-          ? { x: maxX + 32, y: randomBetween(minY, maxY) }
-          : side === 2
-            ? { x: randomBetween(minX, maxX), y: minY - 32 }
-            : { x: randomBetween(minX, maxX), y: maxY + 32 }
+  private pickGatherNode(position: Vector): ResourceNode | undefined {
+    const available = this.state.nodes.filter((node) => node.amount > 0)
+    if (available.length === 0) return undefined
 
-    this.state.hazards.push({
-      id: this.state.nextId++,
-      position,
-      speed: 62 + this.state.day * 4,
-      health: 35,
-      state: 'raiding',
-      attackCooldown: 0,
-    })
-    this.setStatus('Night raider incoming. Build towers to repel it.', 2.4)
+    const preferredKind = this.lowestResourceKind()
+    const preferred = available.filter((node) => node.kind === preferredKind)
+    return nearestNode(position, preferred.length > 0 ? preferred : available)
   }
 
-  private findNearestGatherableNode(): ResourceNode | undefined {
-    let nearest: ResourceNode | undefined
-    let nearestDistance = Number.POSITIVE_INFINITY
+  private lowestResourceKind(): ResourceNode['kind'] {
+    const entries: Array<[ResourceNode['kind'], number]> = [
+      ['wood', this.state.resources.wood],
+      ['stone', this.state.resources.stone * 1.3],
+      ['food', this.state.resources.food],
+    ]
+    entries.sort((a, b) => a[1] - b[1])
+    return entries[0][0]
+  }
 
-    for (const node of this.state.nodes) {
-      if (node.amount <= 0) continue
-      const nodeDistance = distance(this.state.player.position, tileCenter(node.column, node.row))
-      if (nodeDistance < INTERACTION_RANGE && nodeDistance < nearestDistance) {
-        nearest = node
-        nearestDistance = nodeDistance
-      }
-    }
+  private hasCompleteTower(): boolean {
+    return this.state.buildings.some((building) => building.complete && building.kind === 'tower')
+  }
 
-    return nearest
+  private nearestCompleteTower(position: Vector): Building | undefined {
+    return nearestBuilding(position, this.state.buildings.filter((building) => building.complete && building.kind === 'tower'))
   }
 
   private canPlaceOnTile(tile: Tile, kind: BuildingKind): boolean {
@@ -466,7 +733,7 @@ export class KingdomWorld {
   }
 
   private isBuildableTile(tile: Tile): boolean {
-    const nearCamp = distance(tileCenter(tile.column, tile.row), tileCenter(Math.floor(WORLD_COLUMNS / 2), Math.floor(WORLD_ROWS / 2))) < 340
+    const nearCamp = distance(tileCenter(tile.column, tile.row), tileCenter(CAMP_COLUMN, CAMP_ROW)) < 340
     const nodeOnTile = this.state.nodes.some((node) => node.column === tile.column && node.row === tile.row && node.amount > 0)
 
     return (
@@ -477,15 +744,14 @@ export class KingdomWorld {
     )
   }
 
-  private tileAtWorld(position: Vector): Tile | undefined {
-    const column = Math.floor((position.x - WORLD_OFFSET_X) / TILE_SIZE)
-    const row = Math.floor((position.y - WORLD_OFFSET_Y) / TILE_SIZE)
-    return this.state.tiles.find((tile) => tile.column === column && tile.row === row)
+  private tileAtCursor(cursor: CommandCursor): Tile | undefined {
+    return this.state.tiles.find((tile) => tile.column === cursor.column && tile.row === cursor.row)
   }
 
-  private failAtPlayer(message: string): void {
-    this.addFloatingText(message, this.state.player.position, PALETTE.dangerLight)
-    this.spawnSparkles(this.state.player.position, PALETTE.dangerLight, 5)
+  private failAtCursor(message: string): void {
+    const position = tileCenter(this.state.commandCursor.column, this.state.commandCursor.row)
+    this.addFloatingText(message, position, PALETTE.dangerLight)
+    this.spawnSparkles(position, PALETTE.dangerLight, 5)
     this.setStatus(message, 1.8)
   }
 
@@ -505,10 +771,21 @@ export class KingdomWorld {
     })
   }
 
+  private addAttackEffect(from: Vector, to: Vector, color: number): void {
+    this.state.attackEffects.push({
+      id: this.state.nextId++,
+      from: { ...from },
+      to: { ...to },
+      color,
+      life: 0.18,
+      maxLife: 0.18,
+    })
+  }
+
   private spawnSparkles(position: Vector, color: number, count: number): void {
     for (let index = 0; index < count; index += 1) {
       const angle = Math.random() * Math.PI * 2
-      const speed = randomBetween(18, 68)
+      const speed = randomBetween(18, 76)
       this.state.particles.push({
         id: this.state.nextId++,
         position: { ...position },
@@ -571,11 +848,31 @@ function createResourceNodes(): ResourceNode[] {
   }))
 }
 
-function clampToWorld(position: Vector): Vector {
+function createVillager(id: number, position: Vector): Villager {
   return {
-    x: Math.max(WORLD_OFFSET_X + TILE_SIZE, Math.min(WORLD_OFFSET_X + (WORLD_COLUMNS - 1) * TILE_SIZE, position.x)),
-    y: Math.max(WORLD_OFFSET_Y + TILE_SIZE, Math.min(WORLD_OFFSET_Y + (WORLD_ROWS - 1) * TILE_SIZE, position.y)),
+    id,
+    position: { ...position },
+    target: { ...position },
+    task: { kind: 'idle' },
+    carriedAmount: 0,
+    speed: VILLAGER_SPEED + (id % 3) * 7,
+    workTimer: 0,
+    pauseTimer: randomBetween(0.2, 0.9),
+    stepTime: Math.random() * Math.PI * 2,
   }
+}
+
+function randomEdgePosition(): Vector {
+  const side = Math.floor(Math.random() * 4)
+  const minX = WORLD_OFFSET_X
+  const maxX = WORLD_OFFSET_X + WORLD_COLUMNS * TILE_SIZE
+  const minY = WORLD_OFFSET_Y
+  const maxY = WORLD_OFFSET_Y + WORLD_ROWS * TILE_SIZE
+
+  if (side === 0) return { x: minX - 34, y: randomBetween(minY + 24, maxY - 24) }
+  if (side === 1) return { x: maxX + 34, y: randomBetween(minY + 24, maxY - 24) }
+  if (side === 2) return { x: randomBetween(minX + 24, maxX - 24), y: minY - 34 }
+  return { x: randomBetween(minX + 24, maxX - 24), y: maxY + 34 }
 }
 
 function canAfford(resources: ResourceStock, cost: ResourceStock): boolean {
@@ -590,13 +887,13 @@ function spend(resources: ResourceStock, cost: ResourceStock): void {
 }
 
 function gatherAmountFor(kind: ResourceNode['kind']): number {
-  if (kind === 'wood') return 6
-  if (kind === 'stone') return 4
-  return 5
+  if (kind === 'wood') return 5
+  if (kind === 'stone') return 3
+  return 4
 }
 
 function respawnTimeFor(kind: ResourceNode['kind']): number {
-  if (kind === 'wood') return 16
+  if (kind === 'wood') return 15
   if (kind === 'stone') return 21
   return 12
 }
@@ -615,6 +912,34 @@ function formatCost(cost: ResourceStock): string {
     .join(', ')
 }
 
+function nearestNode(position: Vector, nodes: ResourceNode[]): ResourceNode | undefined {
+  return [...nodes].sort((a, b) => distance(position, tileCenter(a.column, a.row)) - distance(position, tileCenter(b.column, b.row)))[0]
+}
+
+function nearestBuilding(position: Vector, buildings: Building[]): Building | undefined {
+  return [...buildings].sort((a, b) => distance(position, tileCenter(a.column, a.row)) - distance(position, tileCenter(b.column, b.row)))[0]
+}
+
+function nearestBuildingId(position: Vector, buildings: Building[]): number | undefined {
+  return nearestBuilding(position, buildings)?.id
+}
+
+function nearestHazard(position: Vector, hazards: Hazard[]): Hazard | undefined {
+  return [...hazards].sort((a, b) => distance(position, a.position) - distance(position, b.position))[0]
+}
+
+function nearestHazardId(position: Vector, hazards: Hazard[]): number | undefined {
+  return nearestHazard(position, hazards)?.id
+}
+
+function offsetTarget(position: Vector, seed: number): Vector {
+  const angle = seed * 1.919
+  return {
+    x: position.x + Math.cos(angle) * 14,
+    y: position.y + Math.sin(angle) * 10,
+  }
+}
+
 function distance(a: Vector, b: Vector): number {
   return Math.hypot(a.x - b.x, a.y - b.y)
 }
@@ -627,4 +952,8 @@ function normalize(vector: Vector): Vector {
 
 function randomBetween(min: number, max: number): number {
   return min + Math.random() * (max - min)
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value))
 }
