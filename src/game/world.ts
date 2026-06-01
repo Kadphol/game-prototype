@@ -26,7 +26,9 @@ import type {
   GameResult,
   GameSnapshot,
   Hazard,
+  JobCounts,
   Particle,
+  QueuePreview,
   ResourceKind,
   ResourceNode,
   ResourceStock,
@@ -34,7 +36,9 @@ import type {
   TaskPriority,
   Terrain,
   Tile,
+  UpgradeBranchKind,
   UpgradeKind,
+  UpgradePurchase,
   UpgradeState,
   Vector,
   Villager,
@@ -61,6 +65,7 @@ interface WorldState {
   dayTimer: number
   priority: TaskPriority
   selectedBuilding: BuildingKind
+  selectedUpgrade: UpgradeKind
   upgrades: UpgradeState
   statusMessage: string
   statusTimer: number
@@ -93,7 +98,7 @@ export interface WorldInput {
   selectedBuilding?: BuildingKind
   selectedPriority?: TaskPriority
   priorityCycle: number
-  upgradePurchase?: UpgradeKind
+  upgradePurchase?: UpgradePurchase
 }
 
 export class KingdomWorld {
@@ -112,7 +117,18 @@ export class KingdomWorld {
       dayTimer: this.state.dayTimer,
       priority: this.state.priority,
       selectedBuilding: this.state.selectedBuilding,
-      upgrades: { ...this.state.upgrades },
+      selectedUpgrade: this.state.selectedUpgrade,
+      upgrades: cloneUpgrades(this.state.upgrades),
+      jobCounts: this.jobCounts(),
+      queuePreview: this.queuePreview(),
+      debugCounts: {
+        villagers: this.state.villagers.length,
+        buildings: this.state.buildings.length,
+        hazards: this.state.hazards.length,
+        particles: this.state.particles.length,
+        floatingTexts: this.state.floatingTexts.length,
+        attackEffects: this.state.attackEffects.length,
+      },
       statusMessage: this.state.statusMessage,
       statusTimer: this.state.statusTimer,
       king: {
@@ -190,10 +206,11 @@ export class KingdomWorld {
       dayTimer: DAY_LENGTH_SECONDS,
       priority: 'gather',
       selectedBuilding: 'hut',
+      selectedUpgrade: 'villagerSpeed',
       upgrades: {
-        villagerSpeed: 0,
-        towerDamage: 0,
-        farmYield: 0,
+        villagerSpeed: { basePurchased: false },
+        towerDamage: { basePurchased: false },
+        farmYield: { basePurchased: false },
       },
       statusMessage: 'Villagers work automatically. Set priority and place buildings.',
       statusTimer: 4.5,
@@ -318,27 +335,56 @@ export class KingdomWorld {
     this.setStatus(`${definition.label} planned. Builders will finish it.`, 2.2)
   }
 
-  private tryPurchaseUpgrade(kind: UpgradeKind): void {
-    const definition = UPGRADES[kind]
-    const level = this.state.upgrades[kind]
+  private tryPurchaseUpgrade(purchase: UpgradePurchase): void {
+    const definition = UPGRADES[purchase.kind]
+    const state = this.state.upgrades[purchase.kind]
+    this.state.selectedUpgrade = purchase.kind
 
-    if (level >= definition.maxLevel) {
-      this.failAtCursor(`${definition.label} is max level`)
+    if (!purchase.branch) {
+      if (state.basePurchased) {
+        this.setStatus(`${definition.baseLabel} learned. Pick a ${definition.label} branch.`, 2.4)
+        return
+      }
+
+      if (!canAfford(this.state.resources, definition.baseCost)) {
+        this.failAtCursor(`Need ${formatCost(definition.baseCost)}`)
+        return
+      }
+
+      spend(this.state.resources, definition.baseCost)
+      state.basePurchased = true
+      const camp = tileCenter(CAMP_COLUMN, CAMP_ROW)
+      this.addFloatingText(definition.baseLabel, camp, PALETTE.gold)
+      this.spawnSparkles(camp, PALETTE.gold, 14)
+      this.setStatus(`${definition.baseLabel}: ${definition.baseDescription}. Branch choice unlocked.`, 2.8)
       return
     }
 
-    const cost = definition.costs[level]
-    if (!canAfford(this.state.resources, cost)) {
-      this.failAtCursor(`Need ${formatCost(cost)}`)
+    const branch = definition.branches.find((candidate) => candidate.kind === purchase.branch)
+    if (!branch) return
+
+    if (!state.basePurchased) {
+      this.failAtCursor(`Unlock ${definition.baseLabel} first`)
       return
     }
 
-    spend(this.state.resources, cost)
-    this.state.upgrades[kind] += 1
+    if (state.branch) {
+      const chosen = definition.branches.find((candidate) => candidate.kind === state.branch)
+      this.setStatus(`${chosen?.label ?? definition.label} already chosen. Other branch locked.`, 2.6)
+      return
+    }
+
+    if (!canAfford(this.state.resources, branch.cost)) {
+      this.failAtCursor(`Need ${formatCost(branch.cost)}`)
+      return
+    }
+
+    spend(this.state.resources, branch.cost)
+    state.branch = branch.kind
     const camp = tileCenter(CAMP_COLUMN, CAMP_ROW)
-    this.addFloatingText(`${definition.label} Lv ${this.state.upgrades[kind]}`, camp, PALETTE.gold)
-    this.spawnSparkles(camp, PALETTE.gold, 14)
-    this.setStatus(`${definition.label} upgraded: ${definition.description}.`, 2.4)
+    this.addFloatingText(branch.label, camp, PALETTE.gold)
+    this.spawnSparkles(camp, PALETTE.gold, 18)
+    this.setStatus(`${branch.label}: ${branch.description}. Alternate branch locked.`, 3)
   }
 
   private ensureVillagerCount(): void {
@@ -432,7 +478,7 @@ export class KingdomWorld {
 
   private moveVillagerToward(villager: Villager, target: Vector, deltaSeconds: number): void {
     const direction = normalize({ x: target.x - villager.position.x, y: target.y - villager.position.y })
-    const speedMultiplier = 1 + this.state.upgrades.villagerSpeed * 0.16
+    const speedMultiplier = this.villagerSpeedMultiplier()
     const speed = (villager.task.kind === 'defend' ? DEFENDER_SPEED : villager.speed) * speedMultiplier
     villager.position.x += direction.x * speed * deltaSeconds
     villager.position.y += direction.y * speed * deltaSeconds
@@ -447,7 +493,7 @@ export class KingdomWorld {
         villager.carried = undefined
         villager.carriedAmount = 0
         villager.task = { kind: 'idle' }
-        villager.pauseTimer = 0.45
+        villager.pauseTimer = this.villagerPause(0.45)
         return
       }
 
@@ -457,7 +503,7 @@ export class KingdomWorld {
         return
       }
 
-      const gathered = Math.min(node.amount, gatherAmountFor(node.kind))
+      const gathered = Math.min(node.amount, gatherAmountFor(node.kind) + this.gatherCarryBonus())
       node.amount -= gathered
       villager.carried = node.kind
       villager.carriedAmount = gathered
@@ -480,7 +526,7 @@ export class KingdomWorld {
 
       building.buildProgress += 0.52
       building.pulse = Math.max(building.pulse, 0.35)
-      villager.pauseTimer = 0.28
+      villager.pauseTimer = this.villagerPause(0.28)
       this.spawnSparkles(tileCenter(building.column, building.row), PALETTE.parchment, 1)
       if (building.buildProgress >= building.buildTime) {
         this.completeBuilding(building)
@@ -494,18 +540,18 @@ export class KingdomWorld {
       if (hazard && distance(villager.position, hazard.position) < 38 && villager.workTimer <= 0) {
         villager.workTimer = 0.55
         this.damageHazard(hazard, 9, villager.position, PALETTE.blue)
-        villager.pauseTimer = 0.16
+        villager.pauseTimer = this.villagerPause(0.16)
         return
       }
 
       villager.target = this.targetForTask(villager.task, villager)
       villager.task = this.state.priority === 'defend' ? villager.task : { kind: 'idle' }
-      villager.pauseTimer = 0.35
+      villager.pauseTimer = this.villagerPause(0.35)
       return
     }
 
     villager.target = offsetTarget(camp, villager.id)
-    villager.pauseTimer = 0.65
+    villager.pauseTimer = this.villagerPause(0.65)
   }
 
   private completeBuilding(building: Building): void {
@@ -535,9 +581,13 @@ export class KingdomWorld {
         building.productionTimer -= deltaSeconds
         if (building.productionTimer <= 0) {
           building.productionTimer = 6.5
-          const foodYield = 5 + this.state.upgrades.farmYield * 2
+          const foodYield = this.farmFoodYield()
+          const goldYield = this.farmGoldYield()
           this.state.resources.food += foodYield
-          this.addFloatingText(`+${foodYield} food`, tileCenter(building.column, building.row), PALETTE.berry)
+          if (goldYield > 0) {
+            this.state.resources.gold += goldYield
+          }
+          this.addFloatingText(goldYield > 0 ? `+${foodYield} food +${goldYield} gold` : `+${foodYield} food`, tileCenter(building.column, building.row), PALETTE.berry)
           this.spawnSparkles(tileCenter(building.column, building.row), PALETTE.berry, 4)
         }
       }
@@ -606,12 +656,13 @@ export class KingdomWorld {
   }
 
   private updateTowerAttacks(deltaSeconds: number): void {
-    const damageBoost = (this.state.priority === 'defend' ? 1.35 : 1) * (1 + this.state.upgrades.towerDamage * 0.32)
+    const damageBoost = (this.state.priority === 'defend' ? 1.35 : 1) * this.towerDamageMultiplier()
+    const towerRange = this.towerRange()
     for (const tower of this.state.buildings) {
       if (!tower.complete || tower.kind !== 'tower') continue
 
       const towerCenter = tileCenter(tower.column, tower.row)
-      const target = nearestHazardInRange(towerCenter, this.state.hazards, TOWER_RANGE)
+      const target = nearestHazardInRange(towerCenter, this.state.hazards, towerRange)
       if (!target) continue
 
       target.health -= TOWER_DAMAGE_PER_SECOND * damageBoost * deltaSeconds
@@ -809,6 +860,73 @@ export class KingdomWorld {
     this.state.statusTimer = timer
   }
 
+  private hasUpgradeBase(kind: UpgradeKind): boolean {
+    return this.state.upgrades[kind].basePurchased
+  }
+
+  private hasUpgradeBranch(branch: UpgradeBranchKind): boolean {
+    return Object.values(this.state.upgrades).some((track) => track.branch === branch)
+  }
+
+  private villagerSpeedMultiplier(): number {
+    let multiplier = this.hasUpgradeBase('villagerSpeed') ? 1.16 : 1
+    if (this.hasUpgradeBranch('trailRunners')) multiplier += 0.18
+    if (this.hasUpgradeBranch('packGuild')) multiplier += 0.08
+    return multiplier
+  }
+
+  private gatherCarryBonus(): number {
+    return this.hasUpgradeBranch('packGuild') ? 1 : 0
+  }
+
+  private villagerPause(base: number): number {
+    return this.hasUpgradeBranch('trailRunners') ? base * 0.74 : base
+  }
+
+  private towerDamageMultiplier(): number {
+    let multiplier = this.hasUpgradeBase('towerDamage') ? 1.32 : 1
+    if (this.hasUpgradeBranch('longbows')) multiplier += 0.2
+    if (this.hasUpgradeBranch('ballistae')) multiplier += 0.55
+    return multiplier
+  }
+
+  private towerRange(): number {
+    return this.hasUpgradeBranch('longbows') ? TOWER_RANGE * 1.25 : TOWER_RANGE
+  }
+
+  private farmFoodYield(): number {
+    let yieldAmount = 5
+    if (this.hasUpgradeBase('farmYield')) yieldAmount += 2
+    if (this.hasUpgradeBranch('orchards')) yieldAmount += 4
+    if (this.hasUpgradeBranch('granaries')) yieldAmount += 2
+    return yieldAmount
+  }
+
+  private farmGoldYield(): number {
+    return this.hasUpgradeBranch('granaries') ? 2 : 0
+  }
+
+  private jobCounts(): JobCounts {
+    const counts = { idle: 0, gather: 0, build: 0, defend: 0, carrying: 0 }
+    for (const villager of this.state.villagers) {
+      counts[villager.task.kind] += 1
+      if (villager.carried) counts.carrying += 1
+    }
+    return counts
+  }
+
+  private queuePreview(): QueuePreview {
+    const constructionSites = this.state.buildings.filter((building) => !building.complete)
+    const totalProgress = constructionSites.reduce((sum, building) => sum + Math.min(1, building.buildProgress / building.buildTime), 0)
+    return {
+      constructions: constructionSites.length,
+      constructionProgress: constructionSites.length > 0 ? totalProgress / constructionSites.length : 1,
+      hazards: this.state.hazards.filter((hazard) => hazard.state === 'raiding').length,
+      warnings: this.state.spawnWarnings.length,
+      nextResource: this.lowestResourceKind(),
+    }
+  }
+
   private addFloatingText(text: string, position: Vector, color: number): void {
     this.state.floatingTexts.push({
       id: this.state.nextId++,
@@ -818,6 +936,7 @@ export class KingdomWorld {
       life: 1.4,
       maxLife: 1.4,
     })
+    capNewest(this.state.floatingTexts, 36)
   }
 
   private addAttackEffect(from: Vector, to: Vector, color: number): void {
@@ -829,10 +948,13 @@ export class KingdomWorld {
       life: 0.18,
       maxLife: 0.18,
     })
+    capNewest(this.state.attackEffects, 32)
   }
 
   private spawnSparkles(position: Vector, color: number, count: number): void {
-    for (let index = 0; index < count; index += 1) {
+    const availableSlots = Math.max(0, 128 - this.state.particles.length)
+    const spawnCount = Math.min(count, availableSlots)
+    for (let index = 0; index < spawnCount; index += 1) {
       const angle = Math.random() * Math.PI * 2
       const speed = randomBetween(18, 76)
       this.state.particles.push({
@@ -928,11 +1050,25 @@ function canAfford(resources: ResourceStock, cost: ResourceStock): boolean {
   return resources.wood >= cost.wood && resources.stone >= cost.stone && resources.food >= cost.food && resources.gold >= cost.gold
 }
 
+function cloneUpgrades(upgrades: UpgradeState): UpgradeState {
+  return {
+    villagerSpeed: { ...upgrades.villagerSpeed },
+    towerDamage: { ...upgrades.towerDamage },
+    farmYield: { ...upgrades.farmYield },
+  }
+}
+
 function spend(resources: ResourceStock, cost: ResourceStock): void {
   resources.wood -= cost.wood
   resources.stone -= cost.stone
   resources.food -= cost.food
   resources.gold -= cost.gold
+}
+
+function capNewest<T>(items: T[], max: number): void {
+  if (items.length > max) {
+    items.splice(0, items.length - max)
+  }
 }
 
 function gatherAmountFor(kind: ResourceNode['kind']): number {

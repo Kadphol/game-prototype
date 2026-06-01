@@ -77,37 +77,67 @@ export const UPGRADES: Record<UpgradeKind, UpgradeDefinition> = {
     kind: 'villagerSpeed',
     label: 'Boots',
     hotkey: '4',
-    maxLevel: 3,
-    costs: [
-      { wood: 16, stone: 0, food: 8, gold: 5 },
-      { wood: 24, stone: 4, food: 10, gold: 9 },
-      { wood: 34, stone: 8, food: 14, gold: 14 },
+    baseLabel: 'Trail Boots',
+    baseCost: { wood: 16, stone: 0, food: 8, gold: 5 },
+    baseDescription: '+16% villager speed',
+    branches: [
+      {
+        kind: 'trailRunners',
+        label: 'Trail Runners',
+        cost: { wood: 24, stone: 4, food: 10, gold: 9 },
+        description: '+18% speed, shorter idle pauses',
+      },
+      {
+        kind: 'packGuild',
+        label: 'Pack Guild',
+        cost: { wood: 20, stone: 4, food: 14, gold: 10 },
+        description: '+1 gathered carry, +8% speed',
+      },
     ],
-    description: 'villagers move faster',
   },
   towerDamage: {
     kind: 'towerDamage',
     label: 'Arrows',
     hotkey: '5',
-    maxLevel: 3,
-    costs: [
-      { wood: 10, stone: 12, food: 0, gold: 7 },
-      { wood: 14, stone: 18, food: 0, gold: 12 },
-      { wood: 20, stone: 26, food: 0, gold: 18 },
+    baseLabel: 'Sharp Arrows',
+    baseCost: { wood: 10, stone: 12, food: 0, gold: 7 },
+    baseDescription: '+32% tower damage',
+    branches: [
+      {
+        kind: 'longbows',
+        label: 'Longbows',
+        cost: { wood: 14, stone: 18, food: 0, gold: 12 },
+        description: '+20% damage, +25% tower range',
+      },
+      {
+        kind: 'ballistae',
+        label: 'Ballistae',
+        cost: { wood: 18, stone: 24, food: 0, gold: 14 },
+        description: '+55% tower damage',
+      },
     ],
-    description: 'towers hit harder',
   },
   farmYield: {
     kind: 'farmYield',
     label: 'Seeds',
     hotkey: '6',
-    maxLevel: 3,
-    costs: [
-      { wood: 10, stone: 0, food: 12, gold: 6 },
-      { wood: 16, stone: 0, food: 18, gold: 10 },
-      { wood: 24, stone: 4, food: 26, gold: 15 },
+    baseLabel: 'Hardy Seeds',
+    baseCost: { wood: 10, stone: 0, food: 12, gold: 6 },
+    baseDescription: '+2 farm food yield',
+    branches: [
+      {
+        kind: 'orchards',
+        label: 'Orchards',
+        cost: { wood: 16, stone: 0, food: 18, gold: 10 },
+        description: '+4 farm food yield',
+      },
+      {
+        kind: 'granaries',
+        label: 'Granaries',
+        cost: { wood: 20, stone: 4, food: 16, gold: 12 },
+        description: '+2 food yield, +2 gold per farm tick',
+      },
     ],
-    description: 'farms grow more food',
   },
 }
 

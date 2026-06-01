@@ -12,6 +12,8 @@ export type VillagerTaskKind = 'idle' | 'gather' | 'build' | 'defend'
 
 export type UpgradeKind = 'villagerSpeed' | 'towerDamage' | 'farmYield'
 
+export type UpgradeBranchKind = 'trailRunners' | 'packGuild' | 'longbows' | 'ballistae' | 'orchards' | 'granaries'
+
 export interface Vector {
   x: number
   y: number
@@ -38,12 +40,68 @@ export interface UpgradeDefinition {
   kind: UpgradeKind
   label: string
   hotkey: string
-  maxLevel: number
-  costs: ResourceStock[]
+  baseLabel: string
+  baseCost: ResourceStock
+  baseDescription: string
+  branches: UpgradeBranchDefinition[]
+}
+
+export interface UpgradeBranchDefinition {
+  kind: UpgradeBranchKind
+  label: string
+  cost: ResourceStock
   description: string
 }
 
-export type UpgradeState = Record<UpgradeKind, number>
+export interface UpgradeTrackState {
+  basePurchased: boolean
+  branch?: UpgradeBranchKind
+}
+
+export type UpgradeState = Record<UpgradeKind, UpgradeTrackState>
+
+export interface UpgradePurchase {
+  kind: UpgradeKind
+  branch?: UpgradeBranchKind
+}
+
+export interface JobCounts {
+  idle: number
+  gather: number
+  build: number
+  defend: number
+  carrying: number
+}
+
+export interface QueuePreview {
+  constructions: number
+  constructionProgress: number
+  hazards: number
+  warnings: number
+  nextResource: Exclude<ResourceKind, 'gold'>
+}
+
+export interface DebugCounts {
+  villagers: number
+  buildings: number
+  hazards: number
+  particles: number
+  floatingTexts: number
+  attackEffects: number
+}
+
+export interface RendererCommand {
+  cursorTile?: Pick<Tile, 'column' | 'row'>
+  place?: boolean
+  selectedBuilding?: BuildingKind
+  selectedPriority?: TaskPriority
+  priorityCycle?: number
+  upgradePurchase?: UpgradePurchase
+  start?: boolean
+  restart?: boolean
+  debugToggle?: boolean
+  source?: string
+}
 
 export interface Tile {
   column: number
@@ -172,7 +230,11 @@ export interface GameSnapshot {
   dayTimer: number
   priority: TaskPriority
   selectedBuilding: BuildingKind
+  selectedUpgrade: UpgradeKind
   upgrades: UpgradeState
+  jobCounts: JobCounts
+  queuePreview: QueuePreview
+  debugCounts: DebugCounts
   statusMessage: string
   statusTimer: number
   king: Player

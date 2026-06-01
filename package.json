@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
-    "preview": "vite preview --host 127.0.0.1"
+    "preview": "vite preview --host 127.0.0.1",
+    "usagi:dev": "usagi dev usagi-port",
+    "usagi:run": "usagi run usagi-port"
   },
   "dependencies": {
     "pixi.js": "^8.18.1"

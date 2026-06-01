@@ -28,6 +28,8 @@ import type {
   SpawnWarning,
   TaskPriority,
   Tile,
+  RendererCommand,
+  UpgradeBranchDefinition,
   UpgradeKind,
   Vector,
   Villager,
@@ -37,6 +39,7 @@ import {
   Container,
   FederatedPointerEvent,
   Graphics,
+  Rectangle,
   Text,
   TextStyle,
   type Application,
@@ -53,7 +56,30 @@ const textStyles = {
   dark: new TextStyle({ fontFamily, fontSize: 16, fill: PALETTE.deepInk, fontWeight: '900' }),
 }
 
+const buttonTextStyles = {
+  dark: new TextStyle({ fontFamily, fontSize: 14, fill: PALETTE.deepInk, fontWeight: '900' }),
+  light: new TextStyle({ fontFamily, fontSize: 14, fill: PALETTE.white, fontWeight: '900' }),
+  compactDark: new TextStyle({ fontFamily, fontSize: 11, fill: PALETTE.deepInk, fontWeight: '900' }),
+  compactLight: new TextStyle({ fontFamily, fontSize: 11, fill: PALETTE.white, fontWeight: '900' }),
+  subDark: new TextStyle({ fontFamily, fontSize: 11, fill: PALETTE.deepInk, fontWeight: '900' }),
+  subLight: new TextStyle({ fontFamily, fontSize: 11, fill: PALETTE.white, fontWeight: '900' }),
+}
+
 const PRIORITY_ORDER: TaskPriority[] = ['gather', 'build', 'defend']
+
+export interface RendererPerformanceStats {
+  fps: number
+  frameMs: number
+  commandSource: string
+}
+
+export interface RendererObjectCounts {
+  stage: number
+  world: number
+  effects: number
+  hud: number
+  overlay: number
+}
 
 export class KingdomRenderer {
   readonly stage = new Container()
@@ -68,7 +94,9 @@ export class KingdomRenderer {
   private pointerPosition: Vector = { x: GAME_WIDTH / 2, y: GAME_HEIGHT / 2 }
   private pointerCursorTile?: Pick<Tile, 'column' | 'row'>
   private pointerPlaceQueued = false
+  private queuedCommand: RendererCommand = {}
   private terrainReady = false
+  private readonly hud: PersistentHud
 
   constructor(private readonly app: Application) {
     this.backgroundLayer.addChild(this.backgroundPattern, this.nightOverlay)
@@ -78,6 +106,8 @@ export class KingdomRenderer {
     drawBackdropPattern(this.backgroundPattern)
     this.stage.on('pointermove', this.handlePointerMove)
     this.stage.on('pointerdown', this.handlePointerDown)
+    this.hud = new PersistentHud((command) => this.queueCommand(command))
+    this.hudLayer.addChild(this.hud.container)
   }
 
   destroy(): void {
@@ -88,6 +118,7 @@ export class KingdomRenderer {
 
   renderStart(): void {
     this.terrainLayer.visible = false
+    this.hud.container.visible = false
     this.clearDynamic()
     drawNightOverlay(this.nightOverlay, 0)
 
@@ -117,17 +148,29 @@ export class KingdomRenderer {
       textStyles.dark,
       24
     )
-    const start = centeredText('Press Enter to Start', centerX, 436, textStyles.subtitle)
-    start.tint = PALETTE.deepInk
+    const startButton = makeInteractiveButton({
+      x: centerX - 170,
+      y: 414,
+      width: 340,
+      height: 48,
+      label: 'Press Enter / Tap to Start',
+      selected: true,
+      affordable: true,
+      onPress: (event) => {
+        event.stopPropagation()
+        this.queueCommand({ start: true, source: 'canvas-start' })
+      },
+    })
 
-    this.overlayLayer.addChild(title, subtitle, ...controls, start)
+    this.overlayLayer.addChild(title, subtitle, ...controls, startButton)
     drawTinyKing(this.overlayLayer, { x: centerX, y: 548 }, 2.8, 0)
     drawTree(this.overlayLayer, centerX - 145, 570, 1.3)
     drawBerryBush(this.overlayLayer, centerX + 138, 578, 1.3)
   }
 
-  renderGame(snapshot: GameSnapshot): void {
+  renderGame(snapshot: GameSnapshot, debugVisible = false, performanceStats: RendererPerformanceStats = { fps: 0, frameMs: 0, commandSource: 'none' }): void {
     this.terrainLayer.visible = true
+    this.hud.container.visible = true
     this.ensureTerrain(snapshot.tiles)
     this.clearDynamic()
     drawNightOverlay(this.nightOverlay, snapshot.dayTimer / DAY_LENGTH_SECONDS)
@@ -139,7 +182,12 @@ export class KingdomRenderer {
 
     this.drawWorld(snapshot)
     this.drawEffects(snapshot)
-    this.drawHud(snapshot)
+    this.hud.update(snapshot, debugVisible, {
+      ...performanceStats,
+      worldObjects: this.worldLayer.children.length,
+      effectObjects: this.effectLayer.children.length,
+      hudObjects: this.hud.objectCount(),
+    })
 
     if (snapshot.phase === 'gameOver' && snapshot.result) {
       this.drawGameOver(snapshot.result)
@@ -150,13 +198,35 @@ export class KingdomRenderer {
     return this.pointerPosition
   }
 
-  consumePointerCommand(): { cursorTile?: Pick<Tile, 'column' | 'row'>; place: boolean } {
-    const command = {
-      cursorTile: this.pointerCursorTile ? { ...this.pointerCursorTile } : undefined,
-      place: this.pointerPlaceQueued,
+  objectCounts(): RendererObjectCounts {
+    return {
+      stage: this.stage.children.length,
+      world: this.worldLayer.children.length,
+      effects: this.effectLayer.children.length,
+      hud: this.hud.objectCount(),
+      overlay: this.overlayLayer.children.length,
     }
+  }
+
+  consumePointerCommand(): RendererCommand {
+    const command = {
+      ...this.queuedCommand,
+      cursorTile: this.pointerCursorTile ? { ...this.pointerCursorTile } : undefined,
+      place: this.pointerPlaceQueued || Boolean(this.queuedCommand.place),
+    }
+    this.queuedCommand = {}
     this.pointerPlaceQueued = false
     return command
+  }
+
+  private queueCommand(command: RendererCommand): void {
+    this.queuedCommand = {
+      ...this.queuedCommand,
+      ...command,
+      place: Boolean(this.queuedCommand.place || command.place),
+      priorityCycle: (this.queuedCommand.priorityCycle ?? 0) + (command.priorityCycle ?? 0),
+      source: command.source ?? this.queuedCommand.source,
+    }
   }
 
   private drawWorld(snapshot: GameSnapshot): void {
@@ -228,159 +298,6 @@ export class KingdomRenderer {
     }
   }
 
-  private drawHud(snapshot: GameSnapshot): void {
-    drawPanel(this.hudLayer, 22, 16, 774, 62)
-    const resources = resourceLine(snapshot.resources)
-    const resourceText = new Text({
-      text: resources,
-      style: textStyles.small,
-    })
-    resourceText.position.set(44, 36)
-    this.hudLayer.addChild(resourceText)
-
-    const dayProgress = 1 - snapshot.dayTimer / DAY_LENGTH_SECONDS
-    drawPanel(this.hudLayer, 818, 16, 440, 62)
-    const dayText = new Text({
-      text: `Day ${snapshot.day}/${MAX_DAYS}  Morale ${snapshot.morale}%`,
-      style: textStyles.small,
-    })
-    dayText.position.set(840, 30)
-    const dayBar = new Graphics()
-      .rect(840, 57, 170, 8)
-      .fill(PALETTE.panelDark)
-      .rect(840, 57, 170 * dayProgress, 8)
-      .fill(snapshot.dayTimer < DAY_LENGTH_SECONDS * 0.35 ? PALETTE.dangerLight : PALETTE.gold)
-      .rect(1036, 57, 170, 8)
-      .fill(PALETTE.panelDark)
-      .rect(1036, 57, 170 * Math.max(0, snapshot.morale / 100), 8)
-      .fill(snapshot.morale > 40 ? PALETTE.grassLight : PALETTE.dangerLight)
-    this.hudLayer.addChild(dayText, dayBar)
-
-    drawPanel(this.hudLayer, 1014, 94, 244, 178)
-    const objective = multilineText(
-      ['Objective', `Prosperity ${snapshot.prosperity}/${WIN_PROSPERITY}`, 'before Day 5 ends.', `Villagers ${snapshot.villagers.length}/${snapshot.population}`],
-      1036,
-      116,
-      textStyles.small,
-      24
-    )
-    this.hudLayer.addChild(...objective)
-
-    drawPanel(this.hudLayer, 22, 574, 332, 122)
-    const priorityTitle = new Text({ text: 'Priority', style: textStyles.small })
-    priorityTitle.position.set(42, 594)
-    this.hudLayer.addChild(priorityTitle)
-    PRIORITY_ORDER.forEach((priority, index) => {
-      this.drawPriorityButton(priority, snapshot.priority === priority, 42 + index * 98, 626)
-    })
-
-    drawPanel(this.hudLayer, 374, 574, 504, 122)
-    BUILDING_ORDER.forEach((kind, index) => {
-      this.drawBuildButton(kind, snapshot.selectedBuilding === kind, 396 + index * 156, 612, snapshot.resources)
-    })
-
-    drawPanel(this.hudLayer, 898, 574, 360, 122)
-    const selected = BUILDINGS[snapshot.selectedBuilding]
-    const selectedLines = multilineText(
-      [
-        `${selected.hotkey} ${selected.label} plan`,
-        `Cost ${compactCost(selected.cost)}`,
-        snapshot.canPlaceHovered ? 'Cursor: valid site' : 'Cursor: blocked or unaffordable',
-      ],
-      918,
-      594,
-      textStyles.small,
-      21
-    )
-    this.hudLayer.addChild(...selectedLines)
-
-    const upgradeTitle = new Text({
-      text: 'Upgrades',
-      style: new TextStyle({ fontFamily, fontSize: 14, fill: PALETTE.white, fontWeight: '900' }),
-    })
-    upgradeTitle.position.set(1050, 590)
-    this.hudLayer.addChild(upgradeTitle)
-    UPGRADE_ORDER.forEach((kind, index) => {
-      this.drawUpgradeButton(kind, snapshot.upgrades[kind], 1046, 612 + index * 26, snapshot.resources)
-    })
-
-    if (snapshot.statusTimer > 0) {
-      const status = centeredText(snapshot.statusMessage, GAME_WIDTH / 2, 558, textStyles.body)
-      status.tint = snapshot.statusMessage.includes('Need') || snapshot.statusMessage.includes('Cannot') ? PALETTE.dangerLight : PALETTE.white
-      this.hudLayer.addChild(status)
-    }
-  }
-
-  private drawBuildButton(kind: BuildingKind, selected: boolean, x: number, y: number, resources: ResourceStock): void {
-    const definition = BUILDINGS[kind]
-    const affordable =
-      resources.wood >= definition.cost.wood &&
-      resources.stone >= definition.cost.stone &&
-      resources.food >= definition.cost.food &&
-      resources.gold >= definition.cost.gold
-    const button = new Graphics()
-      .rect(x, y, 136, 62)
-      .fill(selected ? PALETTE.gold : affordable ? PALETTE.parchment : 0x8c7756)
-      .rect(x + 4, y + 4, 128, 54)
-      .stroke({ color: selected ? PALETTE.white : PALETTE.panelDark, width: 3 })
-    this.hudLayer.addChild(button)
-
-    const label = new Text({
-      text: `${definition.hotkey} ${definition.label}`,
-      style: textStyles.dark,
-    })
-    label.position.set(x + 12, y + 8)
-    const cost = new Text({
-      text: compactCost(definition.cost),
-      style: new TextStyle({ fontFamily, fontSize: 13, fill: PALETTE.deepInk, fontWeight: '900' }),
-    })
-    cost.position.set(x + 12, y + 36)
-    this.hudLayer.addChild(label, cost)
-  }
-
-  private drawPriorityButton(priority: TaskPriority, selected: boolean, x: number, y: number): void {
-    const button = new Graphics()
-      .rect(x, y, 82, 50)
-      .fill(selected ? PALETTE.gold : priorityColor(priority))
-      .rect(x + 4, y + 4, 74, 42)
-      .stroke({ color: selected ? PALETTE.white : PALETTE.panelDark, width: 3 })
-    const label = new Text({
-      text: priority.toUpperCase(),
-      style: new TextStyle({ fontFamily, fontSize: 13, fill: selected ? PALETTE.deepInk : PALETTE.white, fontWeight: '900' }),
-    })
-    label.anchor.set(0.5)
-    label.position.set(x + 41, y + 27)
-    this.hudLayer.addChild(button, label)
-  }
-
-  private drawUpgradeButton(kind: UpgradeKind, level: number, x: number, y: number, resources: ResourceStock): void {
-    const definition = UPGRADES[kind]
-    const maxed = level >= definition.maxLevel
-    const cost = maxed ? undefined : definition.costs[level]
-    const affordable = cost ? canAfford(resources, cost) : false
-    const fill = maxed ? PALETTE.grassDark : affordable ? PALETTE.parchment : 0x8c7756
-    const button = new Graphics()
-      .rect(x, y, 188, 22)
-      .fill(fill)
-      .rect(x + 3, y + 3, 182, 16)
-      .stroke({ color: maxed ? PALETTE.gold : PALETTE.panelDark, width: 2 })
-    this.hudLayer.addChild(button)
-
-    const label = new Text({
-      text: `${definition.hotkey} ${definition.label} L${level}`,
-      style: new TextStyle({ fontFamily, fontSize: 11, fill: maxed || affordable ? PALETTE.deepInk : PALETTE.white, fontWeight: '900' }),
-    })
-    label.position.set(x + 8, y + 4)
-
-    const costText = new Text({
-      text: cost ? compactCost(cost) : 'MAX',
-      style: new TextStyle({ fontFamily, fontSize: 10, fill: maxed || affordable ? PALETTE.deepInk : PALETTE.white, fontWeight: '900' }),
-    })
-    costText.anchor.set(1, 0)
-    costText.position.set(x + 180, y + 5)
-    this.hudLayer.addChild(label, costText)
-  }
-
   private drawGameOver(result: GameResult): void {
     const veil = new Graphics().rect(0, 0, GAME_WIDTH, GAME_HEIGHT).fill({ color: PALETTE.deepInk, alpha: 0.64 })
     drawPanel(this.overlayLayer, 342, 166, 596, 360)
@@ -389,7 +306,19 @@ export class KingdomRenderer {
     title.tint = result.won ? PALETTE.gold : PALETTE.dangerLight
     const reason = centeredText(result.reason, GAME_WIDTH / 2, 292, textStyles.subtitle)
     const score = centeredText(`Score ${result.score}`, GAME_WIDTH / 2, 354, textStyles.body)
-    const restart = centeredText('Press R to Restart', GAME_WIDTH / 2, 438, textStyles.body)
+    const restart = makeInteractiveButton({
+      x: GAME_WIDTH / 2 - 150,
+      y: 416,
+      width: 300,
+      height: 48,
+      label: 'Press R / Tap Restart',
+      selected: true,
+      affordable: true,
+      onPress: (event) => {
+        event.stopPropagation()
+        this.queueCommand({ restart: true, source: 'canvas-restart' })
+      },
+    })
 
     this.overlayLayer.addChild(veil, title, reason, score, restart)
   }
@@ -407,7 +336,6 @@ export class KingdomRenderer {
   private clearDynamic(): void {
     destroyChildren(this.worldLayer)
     destroyChildren(this.effectLayer)
-    destroyChildren(this.hudLayer)
     destroyChildren(this.overlayLayer)
     this.worldLayer.position.set(0, 0)
     this.effectLayer.position.set(0, 0)
@@ -423,7 +351,344 @@ export class KingdomRenderer {
     this.pointerPosition = { x: event.global.x, y: event.global.y }
     this.pointerCursorTile = screenToTile(this.pointerPosition)
     this.pointerPlaceQueued = this.pointerCursorTile !== undefined
+    if (this.pointerPlaceQueued) {
+      this.queuedCommand.source = 'canvas-world'
+    }
   }
+}
+
+interface HudPerformanceStats extends RendererPerformanceStats {
+  worldObjects: number
+  effectObjects: number
+  hudObjects: number
+}
+
+interface ButtonUpdate {
+  label: string
+  sublabel?: string
+  selected?: boolean
+  affordable?: boolean
+  disabled?: boolean
+  fill?: number
+}
+
+interface ButtonOptions extends ButtonUpdate {
+  x: number
+  y: number
+  width: number
+  height: number
+  onPress: (event: FederatedPointerEvent) => void
+}
+
+class HudButton {
+  readonly container = new Container()
+  private readonly background = new Graphics()
+  private readonly label = new Text({ text: '', style: buttonTextStyles.dark })
+  private readonly sublabel = new Text({ text: '', style: buttonTextStyles.subDark })
+
+  constructor(private readonly options: ButtonOptions) {
+    this.container.position.set(options.x, options.y)
+    this.container.eventMode = 'static'
+    this.container.cursor = 'pointer'
+    this.container.hitArea = new Rectangle(0, 0, options.width, options.height)
+    this.container.on('pointertap', options.onPress)
+    this.label.position.set(8, options.height <= 28 ? 6 : 7)
+    this.sublabel.position.set(8, options.height - 19)
+    this.container.addChild(this.background, this.label, this.sublabel)
+    this.update(options)
+  }
+
+  update(update: ButtonUpdate): void {
+    const selected = Boolean(update.selected)
+    const disabled = Boolean(update.disabled)
+    const affordable = update.affordable !== false
+    const fill = update.fill ?? (selected ? PALETTE.gold : affordable && !disabled ? PALETTE.parchment : 0x8c7756)
+    const useDarkText = selected || affordable
+
+    this.background.clear()
+    this.background
+      .rect(0, 0, this.options.width, this.options.height)
+      .fill({ color: fill, alpha: disabled ? 0.68 : 1 })
+      .rect(4, 4, this.options.width - 8, this.options.height - 8)
+      .stroke({ color: selected ? PALETTE.white : PALETTE.panelDark, width: this.options.height <= 28 ? 2 : 3 })
+    this.label.text = update.label
+    this.label.style = this.options.height <= 28
+      ? useDarkText ? buttonTextStyles.compactDark : buttonTextStyles.compactLight
+      : useDarkText ? buttonTextStyles.dark : buttonTextStyles.light
+    this.sublabel.text = update.sublabel ?? ''
+    this.sublabel.style = useDarkText ? buttonTextStyles.subDark : buttonTextStyles.subLight
+    this.sublabel.visible = Boolean(update.sublabel)
+    this.container.alpha = disabled ? 0.72 : 1
+  }
+}
+
+class PersistentHud {
+  readonly container = new Container()
+  private readonly resourcesText = new Text({ text: '', style: textStyles.small })
+  private readonly bars = new Graphics()
+  private readonly dayText = new Text({ text: '', style: textStyles.small })
+  private readonly objectiveText = new Text({ text: '', style: textStyles.small })
+  private readonly prioritySummary = new Text({ text: '', style: textStyles.tiny })
+  private readonly queueText = new Text({ text: '', style: textStyles.tiny })
+  private readonly planText = new Text({ text: '', style: textStyles.tiny })
+  private readonly upgradeTitle = new Text({ text: '', style: textStyles.tiny })
+  private readonly branchHint = new Text({ text: '', style: textStyles.tiny })
+  private readonly statusText = centeredText('', GAME_WIDTH / 2, 486, textStyles.body)
+  private readonly debugOverlay = new Container()
+  private readonly debugBackground = new Graphics()
+  private readonly debugText = new Text({ text: '', style: textStyles.tiny })
+  private readonly buildButtons = new Map<BuildingKind, HudButton>()
+  private readonly priorityButtons = new Map<TaskPriority, HudButton>()
+  private readonly upgradeButtons = new Map<UpgradeKind, HudButton>()
+  private readonly branchButtons: HudButton[] = []
+  private readonly placeButton: HudButton
+  private readonly debugButton: HudButton
+  private selectedUpgrade: UpgradeKind = 'villagerSpeed'
+
+  constructor(private readonly queueCommand: (command: RendererCommand) => void) {
+    this.container.addChild(panelGraphic(22, 16, 774, 62), panelGraphic(818, 16, 440, 62), panelGraphic(1014, 94, 244, 178))
+    this.container.addChild(panelGraphic(22, 574, 286, 122), panelGraphic(320, 574, 440, 122), panelGraphic(778, 502, 480, 194))
+
+    this.resourcesText.position.set(44, 36)
+    this.dayText.position.set(840, 30)
+    this.objectiveText.position.set(1036, 116)
+    this.prioritySummary.position.set(42, 594)
+    this.queueText.position.set(42, 662)
+    this.planText.position.set(342, 592)
+    this.upgradeTitle.position.set(800, 522)
+    this.branchHint.position.set(946, 522)
+    this.debugOverlay.position.set(22, 92)
+    this.debugOverlay.visible = false
+    this.debugText.position.set(14, 12)
+    this.debugOverlay.addChild(this.debugBackground, this.debugText)
+
+    PRIORITY_ORDER.forEach((priority, index) => {
+      const button = new HudButton({
+        x: 42 + index * 84,
+        y: 624,
+        width: 76,
+        height: 34,
+        label: priority.toUpperCase(),
+        fill: priorityColor(priority),
+        onPress: (event) => {
+          event.stopPropagation()
+          this.queueCommand({ selectedPriority: priority, source: `canvas-priority-${priority}` })
+        },
+      })
+      this.priorityButtons.set(priority, button)
+      this.container.addChild(button.container)
+    })
+
+    BUILDING_ORDER.forEach((kind, index) => {
+      const definition = BUILDINGS[kind]
+      const button = new HudButton({
+        x: 342 + index * 132,
+        y: 626,
+        width: 122,
+        height: 52,
+        label: `${definition.hotkey} ${definition.label}`,
+        sublabel: compactCost(definition.cost),
+        onPress: (event) => {
+          event.stopPropagation()
+          this.queueCommand({ selectedBuilding: kind, source: `canvas-build-${kind}` })
+        },
+      })
+      this.buildButtons.set(kind, button)
+      this.container.addChild(button.container)
+    })
+
+    this.placeButton = new HudButton({
+      x: 666,
+      y: 588,
+      width: 76,
+      height: 30,
+      label: 'PLACE',
+      onPress: (event) => {
+        event.stopPropagation()
+        this.queueCommand({ place: true, source: 'canvas-place' })
+      },
+    })
+    this.container.addChild(this.placeButton.container)
+
+    UPGRADE_ORDER.forEach((kind, index) => {
+      const definition = UPGRADES[kind]
+      const button = new HudButton({
+        x: 800,
+        y: 548 + index * 43,
+        width: 132,
+        height: 34,
+        label: `${definition.hotkey} ${definition.label}`,
+        onPress: (event) => {
+          event.stopPropagation()
+          this.selectedUpgrade = kind
+          this.queueCommand({ upgradePurchase: { kind }, source: `canvas-upgrade-${kind}` })
+        },
+      })
+      this.upgradeButtons.set(kind, button)
+      this.container.addChild(button.container)
+    })
+
+    for (let index = 0; index < 2; index += 1) {
+      const button = new HudButton({
+        x: 946,
+        y: 550 + index * 57,
+        width: 286,
+        height: 46,
+        label: '',
+        onPress: (event) => {
+          event.stopPropagation()
+          const branch = UPGRADES[this.selectedUpgrade].branches[index]
+          if (branch) {
+            this.queueCommand({ upgradePurchase: { kind: this.selectedUpgrade, branch: branch.kind }, source: `canvas-branch-${branch.kind}` })
+          }
+        },
+      })
+      this.branchButtons.push(button)
+      this.container.addChild(button.container)
+    }
+
+    this.debugButton = new HudButton({
+      x: 1200,
+      y: 94,
+      width: 42,
+      height: 28,
+      label: 'DBG',
+      onPress: (event) => {
+        event.stopPropagation()
+        this.queueCommand({ debugToggle: true, source: 'canvas-debug' })
+      },
+    })
+    this.container.addChild(this.bars, this.resourcesText, this.dayText, this.objectiveText, this.prioritySummary, this.queueText, this.planText, this.upgradeTitle, this.branchHint, this.statusText, this.debugButton.container, this.debugOverlay)
+  }
+
+  update(snapshot: GameSnapshot, debugVisible: boolean, stats: HudPerformanceStats): void {
+    this.selectedUpgrade = snapshot.selectedUpgrade
+    const dayProgress = 1 - snapshot.dayTimer / DAY_LENGTH_SECONDS
+    this.resourcesText.text = resourceLine(snapshot.resources)
+    this.dayText.text = `Day ${snapshot.day}/${MAX_DAYS}  Morale ${snapshot.morale}%`
+    this.objectiveText.text = [
+      'Objective',
+      `Prosperity ${snapshot.prosperity}/${WIN_PROSPERITY}`,
+      'before Day 5 ends.',
+      `Villagers ${snapshot.villagers.length}/${snapshot.population}`,
+    ].join('\n')
+
+    this.bars.clear()
+    this.bars
+      .rect(840, 57, 170, 8)
+      .fill(PALETTE.panelDark)
+      .rect(840, 57, 170 * dayProgress, 8)
+      .fill(snapshot.dayTimer < DAY_LENGTH_SECONDS * 0.35 ? PALETTE.dangerLight : PALETTE.gold)
+      .rect(1036, 57, 170, 8)
+      .fill(PALETTE.panelDark)
+      .rect(1036, 57, 170 * Math.max(0, snapshot.morale / 100), 8)
+      .fill(snapshot.morale > 40 ? PALETTE.grassLight : PALETTE.dangerLight)
+
+    this.prioritySummary.text = `Priority  I${snapshot.jobCounts.idle} G${snapshot.jobCounts.gather} B${snapshot.jobCounts.build} D${snapshot.jobCounts.defend} C${snapshot.jobCounts.carrying}`
+    this.queueText.text = `Queue ${snapshot.queuePreview.constructions} build ${Math.round(snapshot.queuePreview.constructionProgress * 100)}% | Threat ${snapshot.queuePreview.hazards}+${snapshot.queuePreview.warnings} | Need ${snapshot.queuePreview.nextResource}`
+    const selectedBuilding = BUILDINGS[snapshot.selectedBuilding]
+    this.planText.text = `${selectedBuilding.label} plan  Cost ${compactCost(selectedBuilding.cost)}  ${snapshot.canPlaceHovered ? 'valid site' : 'blocked/unaffordable'}`
+
+    for (const priority of PRIORITY_ORDER) {
+      this.priorityButtons.get(priority)?.update({
+        label: priority.toUpperCase(),
+        selected: snapshot.priority === priority,
+        affordable: true,
+        fill: snapshot.priority === priority ? PALETTE.gold : priorityColor(priority),
+      })
+    }
+
+    for (const kind of BUILDING_ORDER) {
+      const definition = BUILDINGS[kind]
+      this.buildButtons.get(kind)?.update({
+        label: `${definition.hotkey} ${definition.label}`,
+        sublabel: compactCost(definition.cost),
+        selected: snapshot.selectedBuilding === kind,
+        affordable: canAfford(snapshot.resources, definition.cost),
+      })
+    }
+    this.placeButton.update({ label: 'PLACE', selected: snapshot.canPlaceHovered, affordable: snapshot.canPlaceHovered })
+
+    this.updateUpgradePanel(snapshot)
+    this.statusText.text = snapshot.statusTimer > 0 ? snapshot.statusMessage : ''
+    this.statusText.visible = snapshot.statusTimer > 0
+    this.statusText.tint = snapshot.statusMessage.includes('Need') || snapshot.statusMessage.includes('Cannot') || snapshot.statusMessage.includes('first') ? PALETTE.dangerLight : PALETTE.white
+
+    this.debugButton.update({ label: debugVisible ? 'DBG*' : 'DBG', selected: debugVisible, affordable: true })
+    this.debugOverlay.visible = debugVisible
+    if (debugVisible) {
+      this.debugBackground.clear()
+      this.debugBackground.rect(0, 0, 356, 168).fill({ color: PALETTE.deepInk, alpha: 0.82 }).rect(5, 5, 346, 158).stroke({ color: PALETTE.gold, width: 2 })
+      this.debugText.text = [
+        `FPS ${stats.fps.toFixed(0)}  Frame ${stats.frameMs.toFixed(1)}ms`,
+        `Objects W${stats.worldObjects} E${stats.effectObjects} H${stats.hudObjects}`,
+        `Villagers ${snapshot.debugCounts.villagers} Buildings ${snapshot.debugCounts.buildings} Hazards ${snapshot.debugCounts.hazards}`,
+        `Particles ${snapshot.debugCounts.particles} Text ${snapshot.debugCounts.floatingTexts} Bolts ${snapshot.debugCounts.attackEffects}`,
+        `Command ${stats.commandSource}`,
+      ].join('\n')
+    }
+  }
+
+  objectCount(): number {
+    return this.container.children.length + this.debugOverlay.children.length
+  }
+
+  private updateUpgradePanel(snapshot: GameSnapshot): void {
+    const selectedDefinition = UPGRADES[this.selectedUpgrade]
+    const selectedTrack = snapshot.upgrades[this.selectedUpgrade]
+    this.upgradeTitle.text = `Upgrades: ${selectedDefinition.label}`
+    this.branchHint.text = selectedTrack.basePurchased
+      ? selectedTrack.branch ? 'Branch chosen. Alternate locked.' : 'Choose one branch.'
+      : `Prereq: ${selectedDefinition.baseLabel}`
+
+    for (const kind of UPGRADE_ORDER) {
+      const definition = UPGRADES[kind]
+      const track = snapshot.upgrades[kind]
+      const cost = track.basePurchased ? undefined : definition.baseCost
+      this.upgradeButtons.get(kind)?.update({
+        label: `${definition.hotkey} ${definition.label}`,
+        sublabel: track.basePurchased ? track.branch ? branchLabel(kind, track.branch) : 'branch ready' : compactCost(definition.baseCost),
+        selected: this.selectedUpgrade === kind,
+        affordable: !cost || canAfford(snapshot.resources, cost),
+        fill: track.basePurchased ? PALETTE.grassDark : undefined,
+      })
+    }
+
+    selectedDefinition.branches.forEach((branch, index) => {
+      this.updateBranchButton(this.branchButtons[index], snapshot, branch)
+    })
+  }
+
+  private updateBranchButton(button: HudButton | undefined, snapshot: GameSnapshot, branch: UpgradeBranchDefinition): void {
+    if (!button) return
+
+    const track = snapshot.upgrades[this.selectedUpgrade]
+    const chosen = track.branch === branch.kind
+    const lockedByChoice = Boolean(track.branch && !chosen)
+    const lockedByPrereq = !track.basePurchased
+    button.update({
+      label: branch.label,
+      sublabel: lockedByPrereq ? `Needs base | ${compactCost(branch.cost)}` : chosen ? 'Chosen' : lockedByChoice ? 'Locked' : compactCost(branch.cost),
+      selected: chosen,
+      affordable: track.basePurchased && !lockedByChoice && canAfford(snapshot.resources, branch.cost),
+      disabled: lockedByPrereq || lockedByChoice,
+      fill: chosen ? PALETTE.gold : lockedByChoice ? PALETTE.panelDark : undefined,
+    })
+  }
+}
+
+function makeInteractiveButton(options: ButtonOptions): Container {
+  return new HudButton(options).container
+}
+
+function panelGraphic(x: number, y: number, width: number, height: number): Graphics {
+  return new Graphics()
+    .rect(x, y, width, height)
+    .fill(PALETTE.panelDark)
+    .rect(x + 5, y + 5, width - 10, height - 10)
+    .fill(PALETTE.panel)
+    .rect(x + 10, y + 10, width - 20, height - 20)
+    .fill({ color: PALETTE.parchment, alpha: 0.22 })
 }
 
 function drawBackdropPattern(graphics: Graphics): void {
@@ -784,6 +1049,10 @@ function compactCost(cost: ResourceStock): string {
 
 function canAfford(resources: ResourceStock, cost: ResourceStock): boolean {
   return resources.wood >= cost.wood && resources.stone >= cost.stone && resources.food >= cost.food && resources.gold >= cost.gold
+}
+
+function branchLabel(kind: UpgradeKind, branchKind: string): string {
+  return UPGRADES[kind].branches.find((branch) => branch.kind === branchKind)?.label ?? 'chosen'
 }
 
 function resourceColor(kind: ResourceKind): number {

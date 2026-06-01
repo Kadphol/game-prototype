@@ -33,8 +33,14 @@ body {
   place-items: center;
 }
 
-canvas {
+.game-shell {
+  display: grid;
+  place-items: center;
   width: min(100vw, 1280px);
+}
+
+canvas {
+  width: 100%;
   height: auto;
   max-height: 100vh;
   aspect-ratio: 16 / 9;
@@ -43,4 +49,90 @@ canvas {
   outline: 0;
   touch-action: none;
   user-select: none;
+}
+
+.touch-command-bar {
+  display: none;
+  width: 100%;
+  padding: 8px;
+  background: #3f2b1e;
+  border-top: 4px solid #6f4a2b;
+  touch-action: manipulation;
+}
+
+.touch-command-flow {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.touch-command-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.touch-command-group button:first-child:nth-last-child(3),
+.touch-command-group button:first-child:nth-last-child(3) ~ button {
+  grid-column: span 1;
+}
+
+.touch-command-bar button {
+  min-height: 44px;
+  border: 3px solid #3f2b1e;
+  background: #f0d99b;
+  color: #111812;
+  font: 900 12px 'Courier New', Courier, monospace;
+  image-rendering: pixelated;
+  text-transform: uppercase;
+}
+
+.touch-command-bar button.selected {
+  background: #f4c44e;
+  border-color: #fff3ce;
+}
+
+.touch-command-bar button.unaffordable {
+  background: #8c7756;
+  color: #fff3ce;
+}
+
+.touch-command-bar button.locked {
+  background: #6f4a2b;
+  color: #fff3ce;
+  opacity: 0.78;
+}
+
+.touch-command-bar button:disabled {
+  filter: grayscale(0.8);
+}
+
+@media (pointer: coarse), (max-width: 760px) {
+  body {
+    overflow: auto;
+  }
+
+  #app {
+    align-items: start;
+  }
+
+  .game-shell {
+    width: 100vw;
+  }
+
+  canvas {
+    max-height: none;
+  }
+
+  .touch-command-bar {
+    display: block;
+  }
+
+  .touch-command-flow {
+    grid-template-columns: 1fr;
+  }
+
+  .touch-command-group {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }

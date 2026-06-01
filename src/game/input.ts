@@ -1,6 +1,6 @@
-import type { BuildingKind, TaskPriority, UpgradeKind, Vector } from './types'
+import type { BuildingKind, TaskPriority, UpgradePurchase, Vector } from './types'
 
-type InputAction = 'place' | 'start' | 'restart'
+type InputAction = 'place' | 'start' | 'restart' | 'debug'
 
 export class InputController {
   private readonly pressed = new Set<string>()
@@ -51,10 +51,10 @@ export class InputController {
     return undefined
   }
 
-  consumeUpgradePurchase(): UpgradeKind | undefined {
-    if (this.justPressed.has('4')) return 'villagerSpeed'
-    if (this.justPressed.has('5')) return 'towerDamage'
-    if (this.justPressed.has('6')) return 'farmYield'
+  consumeUpgradePurchase(): UpgradePurchase | undefined {
+    if (this.justPressed.has('4')) return { kind: 'villagerSpeed' }
+    if (this.justPressed.has('5')) return { kind: 'towerDamage' }
+    if (this.justPressed.has('6')) return { kind: 'farmYield' }
     return undefined
   }
 
@@ -83,6 +83,8 @@ export class InputController {
         return ['enter']
       case 'restart':
         return ['r']
+      case 'debug':
+        return ['f1', '`']
     }
   }
 
@@ -103,9 +105,17 @@ export class InputController {
       key === 'd' ||
       key === 'q' ||
       key === 'e' ||
+      key === 'g' ||
+      key === 'b' ||
+      key === 'f' ||
+      key === '1' ||
+      key === '2' ||
+      key === '3' ||
       key === '4' ||
       key === '5' ||
-      key === '6'
+      key === '6' ||
+      key === 'f1' ||
+      key === '`'
     ) {
       event.preventDefault()
     }
