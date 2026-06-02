@@ -1,4 +1,5 @@
 local Config = require "config"
+local UI = require "ui"
 
 local Controls = {}
 
@@ -28,14 +29,18 @@ local function screen_to_tile(x, y)
 end
 
 function Controls.start_pressed()
-  return key_pressed(input.KEY_ENTER) or key_pressed(input.KEY_SPACE) or input.pressed(input.BTN1)
+  local mx, my = input.mouse()
+  local hit = input.mouse_pressed(input.MOUSE_LEFT) and UI.button_at(mx, my, "start")
+  return key_pressed(input.KEY_ENTER) or key_pressed(input.KEY_SPACE) or input.pressed(input.BTN1) or hit ~= nil
 end
 
 function Controls.restart_pressed()
-  return key_pressed(input.KEY_R)
+  local mx, my = input.mouse()
+  local hit = input.mouse_pressed(input.MOUSE_LEFT) and UI.button_at(mx, my, "game_over")
+  return key_pressed(input.KEY_R) or hit ~= nil
 end
 
-function Controls.world_command()
+function Controls.world_command(state)
   local dx = 0
   local dy = 0
 
@@ -53,8 +58,11 @@ function Controls.world_command()
   end
 
   local mx, my = input.mouse()
-  local mouse_tile = screen_to_tile(mx, my)
-  local mouse_place = mouse_tile ~= nil and input.mouse_pressed(input.MOUSE_LEFT)
+  local mouse_clicked = input.mouse_pressed(input.MOUSE_LEFT)
+  local ui_button = mouse_clicked and UI.button_at(mx, my, "playing") or nil
+  local over_ui = UI.is_over_playing_ui(mx, my)
+  local mouse_tile = not over_ui and screen_to_tile(mx, my) or nil
+  local mouse_place = mouse_tile ~= nil and mouse_clicked
 
   local command = {
     cursor_delta = { x = dx, y = dy },
@@ -63,34 +71,72 @@ function Controls.world_command()
     priority_cycle = 0,
   }
 
+  if ui_button then
+    UI.apply_button_command(command, ui_button, state)
+  end
+
   if key_pressed(input.KEY_1) then
     command.selected_building = "hut"
+    command.source = "keyboard-build"
   elseif key_pressed(input.KEY_2) then
     command.selected_building = "farm"
+    command.source = "keyboard-build"
   elseif key_pressed(input.KEY_3) then
     command.selected_building = "tower"
+    command.source = "keyboard-build"
   end
 
   if key_pressed(input.KEY_4) then
-    command.upgrade_kind = "villager_speed"
+    command.upgrade_purchase = { kind = "villager_speed" }
+    command.source = "keyboard-upgrade"
   elseif key_pressed(input.KEY_5) then
-    command.upgrade_kind = "tower_damage"
+    command.upgrade_purchase = { kind = "tower_damage" }
+    command.source = "keyboard-upgrade"
   elseif key_pressed(input.KEY_6) then
-    command.upgrade_kind = "farm_yield"
+    command.upgrade_purchase = { kind = "farm_yield" }
+    command.source = "keyboard-upgrade"
+  elseif key_pressed(input.KEY_7) or key_pressed(input.KEY_8) then
+    local selected = state and state.selected_upgrade or Config.upgrade_order[1]
+    local index = key_pressed(input.KEY_7) and 1 or 2
+    local definition = Config.upgrades[selected]
+    local branch = definition and definition.branches[index]
+    if branch then
+      command.upgrade_purchase = { kind = selected, branch = branch.kind }
+      command.source = "keyboard-branch"
+    end
   end
 
   if key_pressed(input.KEY_Q) then
     command.priority_cycle = -1
+    command.source = "keyboard-priority"
   elseif key_pressed(input.KEY_E) then
     command.priority_cycle = 1
+    command.source = "keyboard-priority"
   end
 
   if key_pressed(input.KEY_G) then
     command.selected_priority = "gather"
+    command.source = "keyboard-priority"
   elseif key_pressed(input.KEY_B) then
     command.selected_priority = "build"
+    command.source = "keyboard-priority"
   elseif key_pressed(input.KEY_F) then
     command.selected_priority = "defend"
+    command.source = "keyboard-priority"
+  end
+
+  if key_pressed(input.KEY_F1)
+      or key_pressed(input.KEY_GRAVE)
+      or key_pressed(input.KEY_BACKTICK)
+      or key_pressed(input.KEY_BACKQUOTE) then
+    command.debug_toggle = true
+    command.source = "keyboard-debug"
+  end
+
+  if mouse_place and command.source == nil then
+    command.source = "pointer-world"
+  elseif command.place and command.source == nil then
+    command.source = "keyboard-place"
   end
 
   return command

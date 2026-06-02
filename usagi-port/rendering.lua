@@ -1,7 +1,13 @@
 local Config = require "config"
+local UI = require "ui"
 local World = require "world"
 
 local Rendering = {}
+
+local HudCache = {
+  values = {},
+  text = {},
+}
 
 local function round(value)
   return math.floor(value + 0.5)
@@ -38,6 +44,42 @@ local function priority_color(priority)
   if priority == "gather" then return Config.color.forest end
   if priority == "build" then return Config.color.wood end
   return Config.color.blue
+end
+
+local function cached_text(key, value)
+  if HudCache.values[key] ~= value then
+    HudCache.values[key] = value
+    HudCache.text[key] = value
+  end
+  return HudCache.text[key]
+end
+
+local function short_branch_label(label)
+  if label == "Trail Runners" then return "Runners" end
+  if label == "Pack Guild" then return "Pack" end
+  return label
+end
+
+local function branch_label(kind, branch_kind)
+  local definition = Config.upgrades[kind]
+  if not definition then return "chosen" end
+  for _, branch in ipairs(definition.branches) do
+    if branch.kind == branch_kind then
+      return branch.label
+    end
+  end
+  return "chosen"
+end
+
+local function draw_button(rect, label, sublabel, selected, disabled, fill)
+  local color = fill or (selected and Config.color.gold or disabled and Config.color.panel or Config.color.parchment)
+  local text_color = disabled and Config.color.white or Config.color.deep
+  gfx.rect_fill(rect.x, rect.y, rect.w, rect.h, color)
+  gfx.rect(rect.x, rect.y, rect.w, rect.h, selected and Config.color.white or Config.color.panel_dark)
+  gfx.text(label, rect.x + 3, rect.y + 3, text_color)
+  if sublabel ~= nil and sublabel ~= "" then
+    gfx.text(sublabel, rect.x + 3, rect.y + 13, text_color)
+  end
 end
 
 local function draw_panel(x, y, w, h)
@@ -270,8 +312,13 @@ local function draw_progress_bar(x, y, width, value, color)
 end
 
 local function draw_hud(state)
-  draw_panel(4, 4, 268, 22)
-  gfx.text("Wood " .. state.resources.wood .. "  Stone " .. state.resources.stone .. "  Food " .. state.resources.food .. "  Gold " .. state.resources.gold, 10, 11, Config.color.white)
+  draw_panel(4, 4, 268, 44)
+  local resources = "Wood " .. state.resources.wood .. "  Stone " .. state.resources.stone .. "  Food " .. state.resources.food .. "  Gold " .. state.resources.gold
+  local jobs = "Jobs I" .. state.job_counts.idle .. " G" .. state.job_counts.gather .. " B" .. state.job_counts.build .. " D" .. state.job_counts.defend .. " C" .. state.job_counts.carrying
+  local queue = "Queue " .. state.queue_preview.constructions .. " build " .. math.floor(state.queue_preview.construction_progress * 100 + 0.5) .. "%  Threat " .. state.queue_preview.hazards .. "+" .. state.queue_preview.warnings .. "  Need " .. state.queue_preview.next_resource
+  gfx.text(cached_text("resources", resources), 10, 11, Config.color.white)
+  gfx.text(cached_text("jobs", jobs), 10, 23, Config.color.parchment)
+  gfx.text(cached_text("queue", queue), 10, 35, Config.color.parchment)
 
   draw_panel(282, 4, 194, 44)
   gfx.text("Day " .. state.day .. "/" .. Config.max_days .. "  Morale " .. state.morale .. "%", 290, 11, Config.color.white)
@@ -279,42 +326,62 @@ local function draw_hud(state)
   draw_progress_bar(374, 23, 72, state.morale / 100, state.morale > 40 and Config.color.grass or Config.color.danger)
   gfx.text("Prosperity " .. state.prosperity .. "/" .. Config.win_prosperity, 290, 32, Config.color.parchment)
 
-  draw_panel(4, Config.bottom_ui_y, 120, 36)
-  gfx.text("Priority", 10, Config.bottom_ui_y + 6, Config.color.white)
-  for index, priority in ipairs(Config.priority_order) do
-    local x = 10 + (index - 1) * 36
-    gfx.rect_fill(x, Config.bottom_ui_y + 18, 31, 11, state.priority == priority and Config.color.gold or priority_color(priority))
-    gfx.text(string.sub(string.upper(priority), 1, 3), x + 4, Config.bottom_ui_y + 20, state.priority == priority and Config.color.deep or Config.color.white)
-  end
+  draw_panel(2, Config.bottom_ui_y, Config.game_width - 4, Config.game_height - Config.bottom_ui_y - 2)
 
-  draw_panel(130, Config.bottom_ui_y, 178, 36)
-  for index, kind in ipairs(Config.building_order) do
-    local definition = Config.buildings[kind]
-    local x = 136 + (index - 1) * 57
-    local selected = state.selected_building == kind
-    local affordable = can_afford(state.resources, definition.cost)
-    gfx.rect_fill(x, Config.bottom_ui_y + 7, 52, 22, selected and Config.color.gold or affordable and Config.color.parchment or Config.color.panel)
-    gfx.rect(x, Config.bottom_ui_y + 7, 52, 22, Config.color.panel_dark)
-    gfx.text(definition.hotkey .. " " .. definition.label, x + 3, Config.bottom_ui_y + 10, Config.color.deep)
-    gfx.text(compact_cost(definition.cost), x + 3, Config.bottom_ui_y + 20, Config.color.deep)
-  end
-
-  draw_panel(314, Config.bottom_ui_y, 162, 36)
-  gfx.text("Upgrades", 321, Config.bottom_ui_y + 5, Config.color.white)
-  for index, kind in ipairs(Config.upgrade_order) do
-    local definition = Config.upgrades[kind]
-    local level = state.upgrades[kind]
-    local maxed = level >= definition.max_level
-    local cost = maxed and nil or definition.costs[level + 1]
-    local affordable = cost ~= nil and can_afford(state.resources, cost)
-    local y = Config.bottom_ui_y + 8 + index * 8
-    gfx.text(definition.hotkey .. " " .. definition.label .. " L" .. level, 321, y, maxed and Config.color.gold or affordable and Config.color.parchment or Config.color.panel_dark)
-    gfx.text(maxed and "MAX" or compact_cost(cost), 389, y, maxed and Config.color.gold or affordable and Config.color.parchment or Config.color.panel_dark)
+  for _, rect in ipairs(UI.playing_buttons) do
+    if rect.action == "selected_building" then
+      local definition = Config.buildings[rect.value]
+      local selected = state.selected_building == rect.value
+      local affordable = can_afford(state.resources, definition.cost)
+      draw_button(rect, definition.hotkey .. " " .. definition.label, compact_cost(definition.cost), selected, not affordable)
+    elseif rect.action == "selected_priority" then
+      local selected = state.priority == rect.value
+      draw_button(rect, string.sub(string.upper(rect.value), 1, 3), tostring(state.job_counts[rect.value] or 0), selected, false, selected and Config.color.gold or priority_color(rect.value))
+    elseif rect.action == "place" then
+      draw_button(rect, "PLACE", World.can_place_hovered(state) and "valid" or "blocked", World.can_place_hovered(state), false)
+    elseif rect.action == "debug_toggle" then
+      draw_button(rect, state.debug_visible and "DBG*" or "DBG", "", state.debug_visible, false)
+    elseif rect.action == "upgrade" then
+      local definition = Config.upgrades[rect.value]
+      local track = state.upgrades[rect.value]
+      local selected = state.selected_upgrade == rect.value
+      local disabled = not track.base_purchased and not can_afford(state.resources, definition.base_cost)
+      local sublabel = track.base_purchased and (track.branch and short_branch_label(branch_label(rect.value, track.branch)) or "branch") or compact_cost(definition.base_cost)
+      draw_button(rect, definition.hotkey .. " " .. definition.label, sublabel, selected, disabled, track.base_purchased and Config.color.grass_dark or nil)
+    elseif rect.action == "upgrade_branch" then
+      local definition = Config.upgrades[state.selected_upgrade]
+      local track = state.upgrades[state.selected_upgrade]
+      local branch = definition and definition.branches[rect.value]
+      if branch then
+        local chosen = track.branch == branch.kind
+        local locked = track.branch ~= nil and not chosen
+        local needs_base = not track.base_purchased
+        local disabled = locked or needs_base or (not can_afford(state.resources, branch.cost) and not chosen)
+        local label = (rect.value == 1 and "7 " or "8 ") .. short_branch_label(branch.label)
+        local sublabel = needs_base and "needs base" or chosen and "chosen" or locked and "locked" or compact_cost(branch.cost)
+        draw_button(rect, label, sublabel, chosen, disabled, chosen and Config.color.gold or locked and Config.color.panel_dark or nil)
+      end
+    end
   end
 
   if state.status_timer > 0 then
-    gfx.text(state.status_message, 8, 215, Config.color.white)
+    gfx.text(state.status_message, 8, Config.bottom_ui_y - 11, Config.color.white)
   end
+end
+
+local function draw_debug_overlay(state)
+  if not state.debug_visible then
+    return
+  end
+
+  local performance = state.performance or { fps = 0, frame_ms = 0 }
+  local frame_ms = math.floor(performance.frame_ms * 10 + 0.5) / 10
+  draw_panel(4, 54, 182, 78)
+  gfx.text("FPS " .. math.floor(performance.fps + 0.5) .. "  Frame " .. frame_ms .. "ms", 10, 62, Config.color.white)
+  gfx.text("Objs V" .. state.debug_counts.villagers .. " B" .. state.debug_counts.buildings .. " H" .. state.debug_counts.hazards, 10, 74, Config.color.parchment)
+  gfx.text("FX P" .. state.debug_counts.particles .. " T" .. state.debug_counts.floating_texts .. " A" .. state.debug_counts.attack_effects, 10, 86, Config.color.parchment)
+  gfx.text("Warnings " .. state.debug_counts.spawn_warnings .. " Buttons " .. UI.button_count(), 10, 98, Config.color.parchment)
+  gfx.text("Command " .. state.last_command_source, 10, 110, Config.color.gold)
 end
 
 function Rendering.draw_start()
@@ -323,11 +390,11 @@ function Rendering.draw_start()
   gfx.text_ex("Cozy Kingdom", 146, 62, 2, 0, Config.color.gold, 1)
   gfx.text("Raise a gentle realm before the fifth night.", 112, 90, Config.color.deep)
   gfx.text("Cursor: WASD / arrows or mouse hover", 108, 112, Config.color.deep)
-  gfx.text("Click/tap or Space/Enter to place", 108, 124, Config.color.deep)
+  gfx.text("Tap buttons or Space/Enter to place", 108, 124, Config.color.deep)
   gfx.text("Priority: Q/E or G/B/F", 108, 136, Config.color.deep)
   gfx.text("Build: 1 Hut  2 Farm  3 Tower", 108, 148, Config.color.deep)
-  gfx.text("Upgrades: 4 Boots  5 Arrows  6 Seeds", 108, 160, Config.color.deep)
-  gfx.text("Press Enter to Start", 174, 180, Config.color.white)
+  gfx.text("Upgrades: 4/5/6 base, 7/8 branch", 108, 160, Config.color.deep)
+  draw_button(UI.start, "START", "Enter/tap", true, false)
   draw_tree(160, 216, 1)
   draw_bush(314, 218, 1)
   draw_king({ position = { x = 240, y = 218 }, step_time = 0 })
@@ -362,6 +429,7 @@ function Rendering.draw_game(state)
   draw_king(state.king)
   draw_effects(state)
   draw_hud(state)
+  draw_debug_overlay(state)
 end
 
 function Rendering.draw_game_over(result)
@@ -370,7 +438,7 @@ function Rendering.draw_game_over(result)
   gfx.text_ex(result.title, result.won and 154 or 164, 88, 2, 0, result.won and Config.color.gold or Config.color.danger, 1)
   gfx.text(result.reason, 112, 122, Config.color.white)
   gfx.text("Score " .. result.score, 206, 148, Config.color.gold)
-  gfx.text("Press R to Restart", 186, 170, Config.color.white)
+  draw_button(UI.restart, "RESTART", "R/tap", true, false)
 end
 
 return Rendering

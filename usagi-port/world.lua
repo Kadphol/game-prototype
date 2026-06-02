@@ -257,6 +257,9 @@ local function add_attack_effect(state, from, to, color)
     max_life = 0.18,
   })
   state.next_id = state.next_id + 1
+  if #state.attack_effects > 32 then
+    table.remove(state.attack_effects, 1)
+  end
 end
 
 local function spawn_sparkles(state, position, color, count)
@@ -402,30 +405,72 @@ local function try_place_building(state)
   set_status(state, definition.label .. " planned. Builders will finish it.", 2.2)
 end
 
-local function try_purchase_upgrade(state, kind)
+local function try_purchase_upgrade(state, purchase)
+  local kind = purchase.kind
   local definition = Config.upgrades[kind]
   if not definition then
     return
   end
 
-  local level = state.upgrades[kind]
-  if level >= definition.max_level then
-    fail_at_cursor(state, definition.label .. " is max level")
+  local track = state.upgrades[kind]
+  state.selected_upgrade = kind
+
+  if purchase.branch == nil then
+    if track.base_purchased then
+      set_status(state, definition.base_label .. " learned. Pick a " .. definition.label .. " branch.", 2.4)
+      return
+    end
+
+    if not can_afford(state.resources, definition.base_cost) then
+      fail_at_cursor(state, "Need " .. format_cost(definition.base_cost))
+      return
+    end
+
+    spend(state.resources, definition.base_cost)
+    track.base_purchased = true
+    local camp = World.tile_center(CAMP_COLUMN, CAMP_ROW)
+    add_floating_text(state, definition.base_label, camp, Config.color.gold)
+    spawn_sparkles(state, camp, Config.color.gold, 12)
+    set_status(state, definition.base_label .. ": " .. definition.base_description, 2.4)
+    if effect and effect.flash then
+      effect.flash(0.08, Config.color.gold)
+    end
     return
   end
 
-  local cost = definition.costs[level + 1]
-  if not can_afford(state.resources, cost) then
-    fail_at_cursor(state, "Need " .. format_cost(cost))
+  local branch = nil
+  for _, candidate in ipairs(definition.branches) do
+    if candidate.kind == purchase.branch then
+      branch = candidate
+      break
+    end
+  end
+
+  if not branch then
     return
   end
 
-  spend(state.resources, cost)
-  state.upgrades[kind] = level + 1
+  if not track.base_purchased then
+    fail_at_cursor(state, "Unlock " .. definition.base_label .. " first")
+    return
+  end
+
+  if track.branch ~= nil then
+    set_status(state, "Branch already chosen. Alternate branch locked.", 2.4)
+    return
+  end
+
+  if not can_afford(state.resources, branch.cost) then
+    fail_at_cursor(state, "Need " .. format_cost(branch.cost))
+    return
+  end
+
+  spend(state.resources, branch.cost)
+  track.branch = branch.kind
   local camp = World.tile_center(CAMP_COLUMN, CAMP_ROW)
-  add_floating_text(state, definition.label .. " L" .. state.upgrades[kind], camp, Config.color.gold)
-  spawn_sparkles(state, camp, Config.color.gold, 12)
-  set_status(state, definition.label .. " upgraded: " .. definition.description, 2.4)
+  add_floating_text(state, branch.label, camp, Config.color.gold)
+  spawn_sparkles(state, camp, Config.color.gold, 14)
+  set_status(state, branch.label .. ": " .. branch.description, 2.8)
   if effect and effect.flash then
     effect.flash(0.08, Config.color.gold)
   end
@@ -481,6 +526,57 @@ local function lowest_resource_kind(state)
     kind = "food"
   end
   return kind
+end
+
+local function has_upgrade_base(state, kind)
+  return state.upgrades[kind] ~= nil and state.upgrades[kind].base_purchased == true
+end
+
+local function has_upgrade_branch(state, branch)
+  for _, track in pairs(state.upgrades) do
+    if track.branch == branch then
+      return true
+    end
+  end
+  return false
+end
+
+local function villager_speed_multiplier(state)
+  local multiplier = has_upgrade_base(state, "villager_speed") and 1.16 or 1
+  if has_upgrade_branch(state, "trail_runners") then multiplier = multiplier + 0.18 end
+  if has_upgrade_branch(state, "pack_guild") then multiplier = multiplier + 0.08 end
+  return multiplier
+end
+
+local function gather_carry_bonus(state)
+  return has_upgrade_branch(state, "pack_guild") and 1 or 0
+end
+
+local function villager_pause(state, base)
+  return has_upgrade_branch(state, "trail_runners") and base * 0.74 or base
+end
+
+local function tower_damage_multiplier(state)
+  local multiplier = has_upgrade_base(state, "tower_damage") and 1.32 or 1
+  if has_upgrade_branch(state, "longbows") then multiplier = multiplier + 0.2 end
+  if has_upgrade_branch(state, "ballistae") then multiplier = multiplier + 0.55 end
+  return multiplier
+end
+
+local function tower_range(state)
+  return has_upgrade_branch(state, "longbows") and Config.tower_range * 1.25 or Config.tower_range
+end
+
+local function farm_food_yield(state)
+  local amount = 5
+  if has_upgrade_base(state, "farm_yield") then amount = amount + 2 end
+  if has_upgrade_branch(state, "orchards") then amount = amount + 4 end
+  if has_upgrade_branch(state, "granaries") then amount = amount + 2 end
+  return amount
+end
+
+local function farm_gold_yield(state)
+  return has_upgrade_branch(state, "granaries") and 2 or 0
 end
 
 local function pick_gather_node(state, position)
@@ -570,7 +666,7 @@ end
 
 local function move_villager_toward(state, villager, target, dt)
   local nx, ny = normalize(target.x - villager.position.x, target.y - villager.position.y)
-  local speed_multiplier = 1 + state.upgrades.villager_speed * 0.16
+  local speed_multiplier = villager_speed_multiplier(state)
   local speed = (villager.task.kind == "defend" and Config.defender_speed or villager.speed) * speed_multiplier
   villager.position.x = villager.position.x + nx * speed * dt
   villager.position.y = villager.position.y + ny * speed * dt
@@ -612,7 +708,7 @@ local function resolve_villager_arrival(state, villager)
       villager.carried = nil
       villager.carried_amount = 0
       villager.task = { kind = "idle" }
-      villager.pause_timer = 0.45
+      villager.pause_timer = villager_pause(state, 0.45)
       return
     end
 
@@ -629,7 +725,7 @@ local function resolve_villager_arrival(state, villager)
       return
     end
 
-    local gathered = math.min(node.amount, gather_amount_for(node.kind))
+    local gathered = math.min(node.amount, gather_amount_for(node.kind) + gather_carry_bonus(state))
     node.amount = node.amount - gathered
     villager.carried = node.kind
     villager.carried_amount = gathered
@@ -660,7 +756,7 @@ local function resolve_villager_arrival(state, villager)
 
     building.build_progress = building.build_progress + 0.52
     building.pulse = math.max(building.pulse, 0.35)
-    villager.pause_timer = 0.28
+    villager.pause_timer = villager_pause(state, 0.28)
     spawn_sparkles(state, World.tile_center(building.column, building.row), Config.color.parchment, 1)
     if building.build_progress >= building.build_time then
       complete_building(state, building)
@@ -681,18 +777,18 @@ local function resolve_villager_arrival(state, villager)
     if hazard and distance(villager.position, hazard.position) < 13 and villager.work_timer <= 0 then
       villager.work_timer = 0.55
       damage_hazard(state, hazard, 9, villager.position, Config.color.blue)
-      villager.pause_timer = 0.16
+      villager.pause_timer = villager_pause(state, 0.16)
       return
     end
 
     villager.target = target_for_task(state, villager.task, villager)
     villager.task = state.priority == "defend" and villager.task or { kind = "idle" }
-    villager.pause_timer = 0.35
+    villager.pause_timer = villager_pause(state, 0.35)
     return
   end
 
   villager.target = offset_target(camp, villager.id)
-  villager.pause_timer = 0.65
+  villager.pause_timer = villager_pause(state, 0.65)
 end
 
 local function update_villagers(state, dt)
@@ -725,10 +821,18 @@ local function update_buildings(state, dt)
       building.production_timer = building.production_timer - dt
       if building.production_timer <= 0 then
         building.production_timer = 6.5
-        local food_yield = 5 + state.upgrades.farm_yield * 2
+        local food_yield = farm_food_yield(state)
+        local gold_yield = farm_gold_yield(state)
         state.resources.food = state.resources.food + food_yield
+        if gold_yield > 0 then
+          state.resources.gold = state.resources.gold + gold_yield
+        end
         local center = World.tile_center(building.column, building.row)
-        add_floating_text(state, "+" .. food_yield .. " food", center, Config.color.berry)
+        if gold_yield > 0 then
+          add_floating_text(state, "+" .. food_yield .. " food +" .. gold_yield .. " gold", center, Config.color.berry)
+        else
+          add_floating_text(state, "+" .. food_yield .. " food", center, Config.color.berry)
+        end
         spawn_sparkles(state, center, Config.color.berry, 4)
       end
     end
@@ -787,11 +891,12 @@ local function update_spawn_warnings(state, dt)
 end
 
 local function update_tower_attacks(state, dt)
-  local damage_boost = (state.priority == "defend" and 1.35 or 1) * (1 + state.upgrades.tower_damage * 0.32)
+  local damage_boost = (state.priority == "defend" and 1.35 or 1) * tower_damage_multiplier(state)
+  local range = tower_range(state)
   for _, tower in ipairs(state.buildings) do
     if tower.complete and tower.kind == "tower" then
       local tower_center = World.tile_center(tower.column, tower.row)
-      local target = nearest_hazard_in_range(tower_center, state.hazards, Config.tower_range)
+      local target = nearest_hazard_in_range(tower_center, state.hazards, range)
       if target then
         target.health = target.health - Config.tower_damage_per_second * damage_boost * dt
         target.hit_flash = 0.16
@@ -971,6 +1076,57 @@ local function check_end_conditions(state)
   end
 end
 
+local function refresh_counts(state)
+  local jobs = {
+    idle = 0,
+    gather = 0,
+    build = 0,
+    defend = 0,
+    carrying = 0,
+  }
+  for _, villager in ipairs(state.villagers) do
+    jobs[villager.task.kind] = jobs[villager.task.kind] + 1
+    if villager.carried then
+      jobs.carrying = jobs.carrying + 1
+    end
+  end
+  state.job_counts = jobs
+
+  local constructions = 0
+  local progress = 0
+  for _, building in ipairs(state.buildings) do
+    if not building.complete then
+      constructions = constructions + 1
+      progress = progress + math.min(1, building.build_progress / building.build_time)
+    end
+  end
+
+  local hazards = 0
+  for _, hazard in ipairs(state.hazards) do
+    if hazard.state == "raiding" then
+      hazards = hazards + 1
+    end
+  end
+
+  state.queue_preview = {
+    constructions = constructions,
+    construction_progress = constructions > 0 and progress / constructions or 1,
+    hazards = hazards,
+    warnings = #state.spawn_warnings,
+    next_resource = lowest_resource_kind(state),
+  }
+
+  state.debug_counts = {
+    villagers = #state.villagers,
+    buildings = #state.buildings,
+    hazards = #state.hazards,
+    particles = #state.particles,
+    floating_texts = #state.floating_texts,
+    attack_effects = #state.attack_effects,
+    spawn_warnings = #state.spawn_warnings,
+  }
+end
+
 function World.new()
   local tiles = create_tiles()
   local camp_tile = tiles[tile_index(CAMP_COLUMN, CAMP_ROW)]
@@ -986,7 +1142,7 @@ function World.new()
     }))
   end
 
-  return {
+  local state = {
     resources = copy_stock(Config.starting_resources),
     morale = Config.starting_morale,
     population = 4,
@@ -995,7 +1151,18 @@ function World.new()
     day_timer = Config.day_length,
     priority = "gather",
     selected_building = "hut",
-    upgrades = { villager_speed = 0, tower_damage = 0, farm_yield = 0 },
+    selected_upgrade = "villager_speed",
+    upgrades = {
+      villager_speed = { base_purchased = false, branch = nil },
+      tower_damage = { base_purchased = false, branch = nil },
+      farm_yield = { base_purchased = false, branch = nil },
+    },
+    job_counts = { idle = 4, gather = 0, build = 0, defend = 0, carrying = 0 },
+    queue_preview = { constructions = 0, construction_progress = 1, hazards = 0, warnings = 0, next_resource = "wood" },
+    debug_counts = { villagers = 4, buildings = 1, hazards = 0, particles = 0, floating_texts = 0, attack_effects = 0, spawn_warnings = 0 },
+    debug_visible = false,
+    last_command_source = "none",
+    performance = { fps = 0, frame_ms = 0 },
     status_message = "Villagers work automatically. Set priority and place buildings.",
     status_timer = 4.5,
     king = {
@@ -1035,18 +1202,29 @@ function World.new()
     camp_flash = 0,
     result = nil,
   }
+  refresh_counts(state)
+  return state
 end
 
 function World.update(state, dt, command)
   if state.result then
+    refresh_counts(state)
     return
+  end
+
+  if command.source then
+    state.last_command_source = command.source
+  end
+
+  if command.debug_toggle then
+    state.debug_visible = not state.debug_visible
   end
 
   update_selection(state, command)
   update_cursor(state, dt, command)
 
-  if command.upgrade_kind then
-    try_purchase_upgrade(state, command.upgrade_kind)
+  if command.upgrade_purchase then
+    try_purchase_upgrade(state, command.upgrade_purchase)
   end
 
   if command.place then
@@ -1060,6 +1238,7 @@ function World.update(state, dt, command)
   update_resource_respawns(state, dt)
   update_day(state, dt)
   update_effects(state, dt)
+  refresh_counts(state)
   check_end_conditions(state)
 end
 

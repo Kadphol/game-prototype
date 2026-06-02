@@ -23,11 +23,20 @@ function _init()
   State = {
     phase = "start",
     world = World.new(),
+    fps = 0,
+    frame_ms = 0,
   }
 end
 
 function _update(dt)
   dt = math.min(dt, 0.05)
+  local fps = dt > 0 and 1 / dt or 0
+  State.fps = State.fps == 0 and fps or State.fps * 0.9 + fps * 0.1
+  State.frame_ms = State.frame_ms == 0 and dt * 1000 or State.frame_ms * 0.9 + dt * 100
+  State.world.performance = {
+    fps = State.fps,
+    frame_ms = State.frame_ms,
+  }
 
   if State.phase == "start" then
     if Controls.start_pressed() then
@@ -45,7 +54,7 @@ function _update(dt)
     return
   end
 
-  World.update(State.world, dt, Controls.world_command())
+  World.update(State.world, dt, Controls.world_command(State.world))
   if State.world.result then
     State.phase = "game_over"
   end

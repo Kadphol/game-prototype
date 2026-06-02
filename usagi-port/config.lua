@@ -8,7 +8,7 @@ C.world_columns = 20
 C.world_rows = 12
 C.world_offset_x = 80
 C.world_offset_y = 32
-C.bottom_ui_y = 230
+C.bottom_ui_y = 206
 
 C.villager_speed = 31
 C.defender_speed = 38
@@ -83,37 +83,67 @@ C.upgrades = {
     kind = "villager_speed",
     label = "Boots",
     hotkey = "4",
-    max_level = 3,
-    costs = {
-      { wood = 16, stone = 0, food = 8, gold = 5 },
-      { wood = 24, stone = 4, food = 10, gold = 9 },
-      { wood = 34, stone = 8, food = 14, gold = 14 },
+    base_label = "Trail Boots",
+    base_cost = { wood = 16, stone = 0, food = 8, gold = 5 },
+    base_description = "+16% villager speed",
+    branches = {
+      {
+        kind = "trail_runners",
+        label = "Trail Runners",
+        cost = { wood = 24, stone = 4, food = 10, gold = 9 },
+        description = "+18% speed, shorter idle pauses",
+      },
+      {
+        kind = "pack_guild",
+        label = "Pack Guild",
+        cost = { wood = 20, stone = 4, food = 14, gold = 10 },
+        description = "+1 gathered carry, +8% speed",
+      },
     },
-    description = "villagers move faster",
   },
   tower_damage = {
     kind = "tower_damage",
     label = "Arrows",
     hotkey = "5",
-    max_level = 3,
-    costs = {
-      { wood = 10, stone = 12, food = 0, gold = 7 },
-      { wood = 14, stone = 18, food = 0, gold = 12 },
-      { wood = 20, stone = 26, food = 0, gold = 18 },
+    base_label = "Sharp Arrows",
+    base_cost = { wood = 10, stone = 12, food = 0, gold = 7 },
+    base_description = "+32% tower damage",
+    branches = {
+      {
+        kind = "longbows",
+        label = "Longbows",
+        cost = { wood = 14, stone = 18, food = 0, gold = 12 },
+        description = "+20% damage, +25% tower range",
+      },
+      {
+        kind = "ballistae",
+        label = "Ballistae",
+        cost = { wood = 18, stone = 24, food = 0, gold = 14 },
+        description = "+55% tower damage",
+      },
     },
-    description = "towers hit harder",
   },
   farm_yield = {
     kind = "farm_yield",
     label = "Seeds",
     hotkey = "6",
-    max_level = 3,
-    costs = {
-      { wood = 10, stone = 0, food = 12, gold = 6 },
-      { wood = 16, stone = 0, food = 18, gold = 10 },
-      { wood = 24, stone = 4, food = 26, gold = 15 },
+    base_label = "Hardy Seeds",
+    base_cost = { wood = 10, stone = 0, food = 12, gold = 6 },
+    base_description = "+2 farm food yield",
+    branches = {
+      {
+        kind = "orchards",
+        label = "Orchards",
+        cost = { wood = 16, stone = 0, food = 18, gold = 10 },
+        description = "+4 farm food yield",
+      },
+      {
+        kind = "granaries",
+        label = "Granaries",
+        cost = { wood = 20, stone = 4, food = 16, gold = 12 },
+        description = "+2 food yield, +2 gold per farm tick",
+      },
     },
-    description = "farms grow more food",
   },
 }
 
